@@ -10,7 +10,7 @@ use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 use tokio::sync::mpsc;
 
 use crate::audio_engine::{list_output_devices, AudioConfig, AudioEngine, AudioLevels};
@@ -158,16 +158,26 @@ pub fn run() {
 
             spawn_global_hotkey_listener(Arc::clone(&audio_config));
 
-            // Periodic telemetry emitter to frontend UI (approx 30fps = ~33ms)
+            // Periodic telemetry emitter to frontend UI (~20fps = 50ms)
+            // Throttles when window is minimized to reduce background CPU and GPU consumption to near 0%.
             let app_handle = app.handle().clone();
             let audio_eng = Arc::clone(&audio_engine);
             let net_eng = Arc::clone(&network_engine);
             let aud_cfg = Arc::clone(&audio_config);
 
             tauri::async_runtime::spawn(async move {
-                let mut ticker = tokio::time::interval(std::time::Duration::from_millis(33));
+                let mut ticker = tokio::time::interval(std::time::Duration::from_millis(50));
                 loop {
                     ticker.tick().await;
+
+                    // If main window is minimized, throttle updates to 4Hz and skip IPC event
+                    if let Some(win) = app_handle.get_webview_window("main") {
+                        if win.is_minimized().unwrap_or(false) {
+                            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                            continue;
+                        }
+                    }
+
                     let levels = audio_eng.telemetry.snapshot();
                     let network = net_eng.state.snapshot();
                     let config = aud_cfg.lock().clone();

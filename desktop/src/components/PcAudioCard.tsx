@@ -10,7 +10,7 @@ interface PcAudioCardProps {
   onUpdateConfig: (newConfig: AudioConfig) => void;
 }
 
-export const PcAudioCard: React.FC<PcAudioCardProps> = ({
+const PcAudioCardComponent: React.FC<PcAudioCardProps> = ({
   config,
   levels,
   onToggleMute,
@@ -160,3 +160,5 @@ export const PcAudioCard: React.FC<PcAudioCardProps> = ({
     </div>
   );
 };
+
+export const PcAudioCard = React.memo(PcAudioCardComponent);

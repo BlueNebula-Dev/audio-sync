@@ -206,8 +206,8 @@ pub fn on_output_callback(
     }
 }
 
-// ---------------- PCM taps for listening (20 s each, then auto-close) ----------------
-const DUMP_SECONDS: u64 = 20;
+// ---------------- PCM taps for listening (opt-in via DUMP_SECONDS > 0) ----------------
+const DUMP_SECONDS: u64 = 0;
 struct Dump {
     w: Option<BufWriter<File>>,
     started_us: u64,
@@ -225,9 +225,15 @@ static DSP_DUMP: Mutex<Dump> = Mutex::new(Dump {
 });
 
 pub fn dump_raw(payload: &[u8]) {
+    if DUMP_SECONDS == 0 {
+        return;
+    }
     dump(&RAW_DUMP, "audiosync_A_rx_raw_s16le_mono_48k.raw", payload);
 }
 pub fn dump_dsp(samples: &[f32]) {
+    if DUMP_SECONDS == 0 {
+        return;
+    }
     let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
     dump(&DSP_DUMP, "audiosync_B_post_dsp_f32le_mono_48k.raw", &bytes);
 }
@@ -299,6 +305,11 @@ fn fmt_min(v: u64) -> String {
 }
 
 pub fn spawn_reporter() {
+    // Only run reporter if AUDIOSYNC_DIAG environment variable is set
+    if std::env::var("AUDIOSYNC_DIAG").is_err() {
+        return;
+    }
+
     let _ = now_us();
     emit(format!(
         "[DIAG] ===== session start (build: {}) log: {} =====",

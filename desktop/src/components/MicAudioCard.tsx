@@ -21,7 +21,7 @@ interface MicAudioCardProps {
   onUpdateConfig: (newConfig: AudioConfig) => void;
 }
 
-export const MicAudioCard: React.FC<MicAudioCardProps> = ({
+const MicAudioCardComponent: React.FC<MicAudioCardProps> = ({
   config,
   levels,
   vbcableDeviceName,
@@ -299,3 +299,5 @@ export const MicAudioCard: React.FC<MicAudioCardProps> = ({
     </div>
   );
 };
+
+export const MicAudioCard = React.memo(MicAudioCardComponent);

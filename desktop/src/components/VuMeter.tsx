@@ -10,7 +10,7 @@ interface VuMeterProps {
   segmentsCount?: number;
 }
 
-export const VuMeter: React.FC<VuMeterProps> = ({
+const VuMeterComponent: React.FC<VuMeterProps> = ({
   label,
   sublabel,
   peak,
@@ -33,18 +33,18 @@ export const VuMeter: React.FC<VuMeterProps> = ({
   const getColorClasses = (index: number) => {
     const ratio = index / segmentsCount;
     if (ratio > 0.88) {
-      return 'bg-rose-500 shadow-[0_0_8px_rgba(244,63,94,0.8)]';
+      return 'bg-rose-500';
     }
     if (ratio > 0.72) {
-      return 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.6)]';
+      return 'bg-amber-400';
     }
     if (color === 'violet') {
-      return 'bg-violet-400 shadow-[0_0_8px_rgba(168,85,247,0.7)]';
+      return 'bg-violet-400';
     }
     if (color === 'emerald') {
-      return 'bg-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.7)]';
+      return 'bg-emerald-400';
     }
-    return 'bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.7)]';
+    return 'bg-cyan-400';
   };
 
   return (
@@ -59,7 +59,7 @@ export const VuMeter: React.FC<VuMeterProps> = ({
         </div>
       </div>
 
-      {/* Segmented LED VU Bar */}
+      {/* Segmented LED VU Bar (zero CSS transitions to prevent GPU compositor recalculations) */}
       <div className="h-4 w-full bg-slate-900/80 rounded-pill p-1 border border-white/10 flex items-center gap-1 shadow-inner overflow-hidden">
         {Array.from({ length: segmentsCount }).map((_, idx) => {
           const isActive = !muted && idx < activeSegments;
@@ -68,7 +68,7 @@ export const VuMeter: React.FC<VuMeterProps> = ({
           return (
             <div
               key={idx}
-              className={`h-full flex-1 rounded-sm transition-all duration-75 ${
+              className={`h-full flex-1 rounded-sm ${
                 isActive
                   ? getColorClasses(idx)
                   : 'bg-white/5 opacity-40'
@@ -80,3 +80,5 @@ export const VuMeter: React.FC<VuMeterProps> = ({
     </div>
   );
 };
+
+export const VuMeter = React.memo(VuMeterComponent);

@@ -836,8 +836,8 @@ fn run_vbcable_mic_worker(
     let mut dsp = MicDspPipeline::new(initial_jitter)?;
 
     while running.load(Ordering::Relaxed) {
-        match inbound_mic_rx.try_recv() {
-            Ok(pkt) => {
+        match inbound_mic_rx.blocking_recv() {
+            Some(pkt) => {
                 let cfg_snapshot = config.lock().clone();
                 dsp.ingest_packet(pkt, cfg_snapshot.jitter_buffer_packets.max(8));
                 // Drain any immediately queued packets before running DSP
@@ -846,15 +846,7 @@ fn run_vbcable_mic_worker(
                 }
                 dsp.process_available(&cfg_snapshot, &telemetry, &output_ring);
             }
-            Err(mpsc::error::TryRecvError::Empty) => {
-                let diag_t = crate::diag::now_us(); // DIAG
-                std::thread::sleep(std::time::Duration::from_millis(1));
-                let diag_slept = crate::diag::now_us() - diag_t; // DIAG
-                crate::diag::inc(&crate::diag::WORKER_SLEEP_N); // DIAG
-                crate::diag::add(&crate::diag::WORKER_SLEEP_SUM_US, diag_slept); // DIAG
-                crate::diag::set_max(&crate::diag::WORKER_SLEEP_MAX_US, diag_slept); // DIAG
-            }
-            Err(mpsc::error::TryRecvError::Disconnected) => break,
+            None => break,
         }
     }
 

@@ -7,7 +7,7 @@ interface ConnectionCardProps {
   onSetManualPeer: (ipAndPort: string) => void;
 }
 
-export const ConnectionCard: React.FC<ConnectionCardProps> = ({ network, onSetManualPeer }) => {
+const ConnectionCardComponent: React.FC<ConnectionCardProps> = ({ network, onSetManualPeer }) => {
   const [manualIp, setManualIp] = useState('');
   const [showManualInput, setShowManualInput] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -153,3 +153,5 @@ export const ConnectionCard: React.FC<ConnectionCardProps> = ({ network, onSetMa
     </div>
   );
 };
+
+export const ConnectionCard = React.memo(ConnectionCardComponent);
