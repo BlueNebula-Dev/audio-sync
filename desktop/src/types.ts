@@ -5,6 +5,7 @@ export interface AudioConfig {
   mic_muted: boolean;
   push_to_talk_enabled: boolean;
   push_to_talk_active: boolean;
+  aec_enabled: boolean;
   rnnoise_enabled: boolean;
   vad_gate_threshold: number;
   mic_gain_db: number;

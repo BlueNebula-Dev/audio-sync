@@ -217,8 +217,30 @@ const MicAudioCardComponent: React.FC<MicAudioCardProps> = ({
         </button>
       </div>
 
-      {/* DSP Sliders: RNNoise AI, VAD Gate, Mic Gain Boost, Jitter Buffer */}
+      {/* DSP Sliders: AEC3, RNNoise AI, VAD Gate, Mic Gain Boost, Jitter Buffer */}
       <div className="flex flex-col gap-4 pt-1 border-t border-white/5 text-xs">
+        {/* WebRTC AEC3 Acoustic Echo Cancellation Toggle */}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <ShieldCheckIcon size={16} className="text-cyan-400" />
+            <div>
+              <div className="font-semibold text-slate-200">Acoustic Echo Cancellation (AEC3)</div>
+              <div className="text-[10px] text-slate-400">Cancels PC speaker audio picked up by phone mic</div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => onUpdateConfig({ ...config, aec_enabled: !config.aec_enabled })}
+            className={`w-10 h-5 rounded-pill p-0.5 transition-colors border flex items-center ${
+              config.aec_enabled
+                ? 'bg-cyan-500 border-cyan-400 justify-end shadow-sm'
+                : 'bg-white/10 border-white/10 justify-start'
+            }`}
+          >
+            <div className="w-3.5 h-3.5 rounded-full bg-white shadow-md" />
+          </button>
+        </div>
+
         {/* RNNoise Toggle and VAD Gate */}
         <div className="flex flex-col gap-2">
           <div className="flex items-center justify-between">

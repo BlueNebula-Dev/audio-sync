@@ -7,6 +7,8 @@ use cpal::{BufferSize, Device, SampleFormat, StreamConfig};
 use nnnoiseless::DenoiseState;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use sonora::config::EchoCanceller as SonoraEchoCanceller;
+use sonora::{AudioProcessing, Config as SonoraConfig, StreamConfig as SonoraStreamConfig};
 use thiserror::Error;
 use tokio::sync::mpsc;
 
@@ -55,6 +57,8 @@ pub struct AudioConfig {
     pub push_to_talk_enabled: bool,
     /// Current state of the Push-to-Talk key/button.
     pub push_to_talk_active: bool,
+    /// Enable WebRTC AEC3 Acoustic Echo Cancellation using WASAPI loopback as reference.
+    pub aec_enabled: bool,
     /// Enable AI noise suppression (RNNoise) on iPhone microphone stream.
     pub rnnoise_enabled: bool,
     /// Voice Activity Detection (VAD) gate threshold (0.0 = disabled, up to 0.95).
@@ -82,6 +86,7 @@ impl Default for AudioConfig {
             mic_muted: false,
             push_to_talk_enabled: false,
             push_to_talk_active: false,
+            aec_enabled: true,
             rnnoise_enabled: true,
             vad_gate_threshold: 0.15,
             mic_gain_db: 0.0,
@@ -262,17 +267,33 @@ impl Default for OutputRingState {
     }
 }
 
-/// Stateful DSP processor combining Opus decoding, RNNoise AI denoising, VAD gate, and Gain boost.
+/// Stateful DSP processor combining WebRTC AEC3, Opus decoding, RNNoise AI denoising, VAD gate, and Gain boost.
 pub struct MicDspPipeline {
     rnnoise: Box<DenoiseState<'static>>,
+    aec: Option<AudioProcessing>,
     jitter: AdaptiveJitterBuffer,
     rnnoise_input_fifo: VecDeque<f32>,
 }
 
 impl MicDspPipeline {
     pub fn new(jitter_depth: usize) -> Result<Self, AudioEngineError> {
+        let aec = {
+            let config = SonoraConfig {
+                echo_canceller: Some(SonoraEchoCanceller::default()),
+                ..Default::default()
+            };
+            Some(
+                AudioProcessing::builder()
+                    .config(config)
+                    .capture_config(SonoraStreamConfig::new(OPUS_SAMPLE_RATE, 1))
+                    .render_config(SonoraStreamConfig::new(OPUS_SAMPLE_RATE, 1))
+                    .build(),
+            )
+        };
+
         Ok(Self {
             rnnoise: DenoiseState::new(),
+            aec,
             jitter: AdaptiveJitterBuffer::new(jitter_depth),
             rnnoise_input_fifo: VecDeque::with_capacity(FRAME_SAMPLES_10MS * 4),
         })
@@ -285,14 +306,29 @@ impl MicDspPipeline {
             .push(packet.header.sequence_num, packet.payload);
     }
 
-    /// Ingests available jitter-buffered packets (16-bit PCM Mono), runs RNNoise + Gain Boost, and pushes 48kHz mono
-    /// samples into `output_ring`.
+    /// Ingests available jitter-buffered packets (16-bit PCM Mono), runs WebRTC AEC3, RNNoise + Gain Boost,
+    /// and pushes 48kHz mono samples into `output_ring`.
     pub fn process_available(
         &mut self,
         config: &AudioConfig,
         telemetry: &AtomicAudioTelemetry,
         output_ring: &Mutex<OutputRingState>,
+        render_ref_rx: &std::sync::mpsc::Receiver<Vec<f32>>,
     ) {
+        // Drain pending render reference frames from WASAPI loopback into AEC3
+        if let Some(apm) = &mut self.aec {
+            if config.aec_enabled {
+                while let Ok(render_frame) = render_ref_rx.try_recv() {
+                    if render_frame.len() == FRAME_SAMPLES_10MS {
+                        let mut render_out = [0.0f32; FRAME_SAMPLES_10MS];
+                        let _ = apm.process_render_f32(&[&render_frame], &mut [&mut render_out]);
+                    }
+                }
+            } else {
+                while render_ref_rx.try_recv().is_ok() {}
+            }
+        }
+
         loop {
             match self.jitter.pop_next() {
                 JitterPopResult::NotReady => break,
@@ -322,7 +358,7 @@ impl MicDspPipeline {
 
         let gain_linear = 10.0_f32.powf(config.mic_gain_db / 20.0);
 
-        // Process in exact 480-sample (10ms) frames required by RNNoise
+        // Process in exact 480-sample (10ms) frames required by AEC3 & RNNoise
         while self.rnnoise_input_fifo.len() >= FRAME_SAMPLES_10MS {
             let mut raw_frame = [0.0f32; FRAME_SAMPLES_10MS];
             for slot in &mut raw_frame {
@@ -340,13 +376,31 @@ impl MicDspPipeline {
                 continue;
             }
 
+            // 1. WebRTC AEC3 Acoustic Echo Cancellation (subtracts PC desktop speaker audio picked up by phone mic)
+            let mut aec_cleaned = [0.0f32; FRAME_SAMPLES_10MS];
+            if config.aec_enabled {
+                if let Some(apm) = &mut self.aec {
+                    let mut dest = [0.0f32; FRAME_SAMPLES_10MS];
+                    if apm.process_capture_f32(&[&raw_frame], &mut [&mut dest]).is_ok() {
+                        aec_cleaned.copy_from_slice(&dest);
+                    } else {
+                        aec_cleaned.copy_from_slice(&raw_frame);
+                    }
+                } else {
+                    aec_cleaned.copy_from_slice(&raw_frame);
+                }
+            } else {
+                aec_cleaned.copy_from_slice(&raw_frame);
+            }
+
+            // 2. AI Noise Suppression (RNNoise) on AEC-cleaned stream
             let mut processed_frame = [0.0f32; FRAME_SAMPLES_10MS];
             let vad_prob = if config.rnnoise_enabled {
                 // `nnnoiseless` operates on 16-bit PCM amplitude scale (-32768.0..32767.0)
                 let mut scaled_in = [0.0f32; FRAME_SAMPLES_10MS];
                 let mut scaled_out = [0.0f32; FRAME_SAMPLES_10MS];
                 for i in 0..FRAME_SAMPLES_10MS {
-                    scaled_in[i] = (raw_frame[i] * 32768.0).clamp(-32768.0, 32767.0);
+                    scaled_in[i] = (aec_cleaned[i] * 32768.0).clamp(-32768.0, 32767.0);
                 }
                 let vad = self.rnnoise.process_frame(&mut scaled_out, &scaled_in);
                 let gate_factor = if vad < config.vad_gate_threshold {
@@ -366,7 +420,7 @@ impl MicDspPipeline {
                 }
                 vad
             } else {
-                processed_frame.copy_from_slice(&raw_frame);
+                processed_frame.copy_from_slice(&aec_cleaned);
                 1.0
             };
 
@@ -513,6 +567,8 @@ impl AudioEngine {
             return Ok(());
         }
 
+        let (render_ref_tx, render_ref_rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(64);
+
         let running_loopback = Arc::clone(&self.running);
         let config_loopback = Arc::clone(&self.config);
         let telemetry_loopback = Arc::clone(&self.telemetry);
@@ -526,6 +582,7 @@ impl AudioEngine {
                     config_loopback,
                     telemetry_loopback,
                     outbound_opus_tx,
+                    render_ref_tx,
                 ) {
                     log::error!("WASAPI loopback worker exited with error: {err}");
                 }
@@ -549,6 +606,7 @@ impl AudioEngine {
                     vbcable_name_slot,
                     vbcable_flag_slot,
                     &mut inbound_mic_rx,
+                    render_ref_rx,
                 ) {
                     log::error!("VB-CABLE mic worker exited with error: {err}");
                 }
@@ -566,6 +624,7 @@ fn run_wasapi_loopback_worker(
     config: Arc<Mutex<AudioConfig>>,
     telemetry: Arc<AtomicAudioTelemetry>,
     outbound_opus_tx: mpsc::Sender<Vec<u8>>,
+    render_ref_tx: std::sync::mpsc::SyncSender<Vec<f32>>,
 ) -> Result<(), AudioEngineError> {
     let host = cpal::default_host();
     // On Windows WASAPI, building an *input* stream on an *output* device opens it in Loopback mode!
@@ -650,14 +709,19 @@ fn run_wasapi_loopback_worker(
         .map_err(|e| AudioEngineError::PlayStreamError(e.to_string()))?;
 
     let mut stereo_48k_fifo: VecDeque<f32> = VecDeque::with_capacity(OPUS_SAMPLE_RATE as usize * 2);
+    let mut mono_render_fifo: VecDeque<f32> = VecDeque::with_capacity(FRAME_SAMPLES_10MS * 4);
 
     while running.load(Ordering::Relaxed) {
         match pcm_rx.recv_timeout(std::time::Duration::from_millis(25)) {
             Ok(raw_interleaved) => {
                 let cfg_snapshot = config.lock().clone();
-                if !cfg_snapshot.pc_to_phone_enabled || cfg_snapshot.pc_muted {
+                let need_opus = cfg_snapshot.pc_to_phone_enabled && !cfg_snapshot.pc_muted;
+                let need_aec = cfg_snapshot.aec_enabled;
+
+                if !need_opus && !need_aec {
                     telemetry.store_pc_levels(0.0, 0.0);
                     stereo_48k_fifo.clear();
+                    mono_render_fifo.clear();
                     continue;
                 }
 
@@ -681,15 +745,37 @@ fn run_wasapi_loopback_worker(
                     }
 
                     let (peak, rms) = compute_peak_and_rms(&pcm_frame);
-                    telemetry.store_pc_levels(peak, rms);
+                    if need_opus {
+                        telemetry.store_pc_levels(peak, rms);
+                    } else {
+                        telemetry.store_pc_levels(0.0, 0.0);
+                    }
+
+                    // Feed 10ms mono frames to AEC3 render reference channel
+                    if need_aec {
+                        for i in 0..frame_samples_per_ch {
+                            let l = pcm_frame[i * 2];
+                            let r = pcm_frame[i * 2 + 1];
+                            mono_render_fifo.push_back((l + r) * 0.5);
+                        }
+                        while mono_render_fifo.len() >= FRAME_SAMPLES_10MS {
+                            let mut render_10ms = vec![0.0f32; FRAME_SAMPLES_10MS];
+                            for slot in &mut render_10ms {
+                                *slot = mono_render_fifo.pop_front().unwrap_or(0.0);
+                            }
+                            let _ = render_ref_tx.try_send(render_10ms);
+                        }
+                    }
 
                     // Pack into pristine 16-bit Little-Endian PCM (480 samples * 2 = 960 bytes, zero codec mismatch)
-                    let mut pcm16_bytes = Vec::with_capacity(interleaved_frame_len * 2);
-                    for &s in &pcm_frame {
-                        let clamped = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
-                        pcm16_bytes.extend_from_slice(&clamped.to_le_bytes());
+                    if need_opus {
+                        let mut pcm16_bytes = Vec::with_capacity(interleaved_frame_len * 2);
+                        for &s in &pcm_frame {
+                            let clamped = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+                            pcm16_bytes.extend_from_slice(&clamped.to_le_bytes());
+                        }
+                        let _ = outbound_opus_tx.try_send(pcm16_bytes);
                     }
-                    let _ = outbound_opus_tx.try_send(pcm16_bytes);
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -711,6 +797,7 @@ fn run_vbcable_mic_worker(
     vbcable_name_slot: Arc<Mutex<String>>,
     vbcable_flag_slot: Arc<AtomicBool>,
     inbound_mic_rx: &mut mpsc::Receiver<FramedPacket>,
+    render_ref_rx: std::sync::mpsc::Receiver<Vec<f32>>,
 ) -> Result<(), AudioEngineError> {
     let hint = config.lock().virtual_mic_device_hint.clone();
     let (output_device, dev_name, is_vbcable) = find_vbcable_output_device(&hint)?;
@@ -844,7 +931,7 @@ fn run_vbcable_mic_worker(
                 while let Ok(more_pkt) = inbound_mic_rx.try_recv() {
                     dsp.ingest_packet(more_pkt, cfg_snapshot.jitter_buffer_packets.max(8));
                 }
-                dsp.process_available(&cfg_snapshot, &telemetry, &output_ring);
+                dsp.process_available(&cfg_snapshot, &telemetry, &output_ring, &render_ref_rx);
             }
             None => break,
         }
@@ -1040,10 +1127,74 @@ mod tests {
         let cfg = AudioConfig::default();
         let telemetry = AtomicAudioTelemetry::default();
         let output_ring = Mutex::new(OutputRingState::new());
+        let (_render_tx, render_rx) = std::sync::mpsc::sync_channel(1);
 
         dsp.ingest_packet(pkt, 1);
-        dsp.process_available(&cfg, &telemetry, &output_ring);
+        dsp.process_available(&cfg, &telemetry, &output_ring, &render_rx);
 
         assert_eq!(output_ring.lock().ring.len(), FRAME_SAMPLES_10MS);
+    }
+
+    #[test]
+    fn test_aec3_echo_suppression_pipeline() {
+        let mut dsp = MicDspPipeline::new(1).expect("DSP pipeline init");
+        let (render_tx, render_rx) = std::sync::mpsc::sync_channel(16);
+
+        // Feed render frames (PC speaker playing 1000Hz tone)
+        for _ in 0..10 {
+            let mut render_frame = vec![0.0f32; FRAME_SAMPLES_10MS];
+            for i in 0..FRAME_SAMPLES_10MS {
+                let t = i as f32 / OPUS_SAMPLE_RATE as f32;
+                render_frame[i] = (2.0 * std::f32::consts::PI * 1000.0 * t).sin() * 0.4;
+            }
+            render_tx.send(render_frame).unwrap();
+        }
+
+        // Echo picked up by mic
+        let mut echo_pcm16 = Vec::with_capacity(FRAME_SAMPLES_10MS * 2);
+        for i in 0..FRAME_SAMPLES_10MS {
+            let t = i as f32 / OPUS_SAMPLE_RATE as f32;
+            let sample = (2.0 * std::f32::consts::PI * 1000.0 * t).sin() * 0.25;
+            let s16 = (sample * 32767.0) as i16;
+            echo_pcm16.extend_from_slice(&s16.to_le_bytes());
+        }
+
+        let pkt = FramedPacket::new(PacketType::AudioOpus, StreamId::PhoneToPc, 1, 100, echo_pcm16);
+        let cfg = AudioConfig {
+            aec_enabled: true,
+            rnnoise_enabled: false,
+            ..Default::default()
+        };
+        let telemetry = AtomicAudioTelemetry::default();
+        let output_ring = Mutex::new(OutputRingState::new());
+
+        dsp.ingest_packet(pkt, 1);
+        dsp.process_available(&cfg, &telemetry, &output_ring, &render_rx);
+
+        assert_eq!(output_ring.lock().ring.len(), FRAME_SAMPLES_10MS);
+    }
+
+    #[test]
+    fn test_sonora_api() {
+        use sonora::{AudioProcessing, Config, StreamConfig};
+        use sonora::config::EchoCanceller;
+
+        let config = Config {
+            echo_canceller: Some(EchoCanceller::default()),
+            ..Default::default()
+        };
+        let mut apm = AudioProcessing::builder()
+            .config(config)
+            .capture_config(StreamConfig::new(48000, 1))
+            .render_config(StreamConfig::new(48000, 1))
+            .build();
+
+        let render_frame = [0.0f32; 480];
+        let mut render_out = [0.0f32; 480];
+        let capture_frame = [0.0f32; 480];
+        let mut out_frame = [0.0f32; 480];
+
+        apm.process_render_f32(&[&render_frame], &mut [&mut render_out]).expect("process render");
+        apm.process_capture_f32(&[&capture_frame], &mut [&mut out_frame]).expect("process capture");
     }
 }

@@ -473,9 +473,9 @@ public final class AudioEngineManager: ObservableObject {
     public func configureAudioSession() throws {
         let session = AVAudioSession.sharedInstance()
 
-        // Use .default mode with [.defaultToSpeaker, .allowBluetoothHFP, .mixWithOthers]
-        // Note: .voiceChat or .videoChat forces iOS into telephone bandpass call mode (routed to earpiece receiver with mono 16kHz low volume!).
-        // Using mode .default preserves pristine, full-volume stereo media playback on the main iPhone speakers!
+        // Configure AVAudioSession with .voiceChat mode and [.defaultToSpeaker, .allowBluetoothHFP, .mixWithOthers, .allowBluetoothA2DP].
+        // .voiceChat activates iOS hardware multi-mic directional beamforming, AGC, and acoustic echo isolation.
+        // .defaultToSpeaker guarantees that loudspeaker output is preserved without dropping volume to receiver earpiece.
         var options: AVAudioSession.CategoryOptions = [
             .defaultToSpeaker,
             .allowBluetoothHFP,
@@ -487,7 +487,7 @@ public final class AudioEngineManager: ObservableObject {
 
         try session.setCategory(
             .playAndRecord,
-            mode: .default,
+            mode: .voiceChat,
             options: options
         )
 
@@ -592,8 +592,17 @@ public final class AudioEngineManager: ObservableObject {
 
         audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: stereo48kFormat)
 
-        // Configure input node tap for Microphone capture
+        // Configure input node tap for Microphone capture with hardware Voice Processing enabled
         let inputNode = audioEngine.inputNode
+        do {
+            if #available(iOS 13.0, *) {
+                try inputNode.setVoiceProcessingEnabled(true)
+                print("[AudioEngineManager] Enabled iOS VoiceProcessingIO on inputNode")
+            }
+        } catch {
+            print("[AudioEngineManager] Failed to enable VoiceProcessingIO on inputNode: \(error.localizedDescription)")
+        }
+
         let hwInputFormat = inputNode.inputFormat(forBus: 0)
         let hwSampleRate = hwInputFormat.sampleRate > 0 ? hwInputFormat.sampleRate : kOpusSampleRate
         let hwChannels = max(1, Int(hwInputFormat.channelCount))
