@@ -360,45 +360,121 @@ public enum AudioOutputRoute: String, CaseIterable, Identifiable, Sendable {
 public final class AudioEngineManager: ObservableObject {
     // Published UI state & live VU meters
     @Published public private(set) var isEngineRunning: Bool = false
-    @Published public var pcToPhoneEnabled: Bool = true
-    @Published public var phoneToPcEnabled: Bool = true
+    @Published public var pcToPhoneEnabled: Bool = true {
+        didSet {
+            guard oldValue != pcToPhoneEnabled else { return }
+            applyPcToPhonePowerState(enabled: pcToPhoneEnabled)
+            if !isApplyingRemoteSync { pushSyncConfigToPc() }
+        }
+    }
+    @Published public var phoneToPcEnabled: Bool = true {
+        didSet {
+            guard oldValue != phoneToPcEnabled else { return }
+            applyPhoneToPcPowerState(enabled: phoneToPcEnabled)
+            if !isApplyingRemoteSync { pushSyncConfigToPc() }
+        }
+    }
     @Published public var isMicMuted: Bool = false {
         didSet {
-            networkClient?.sendControlMessage(.muteState(streamId: .phoneToPc, muted: isMicMuted))
+            guard oldValue != isMicMuted else { return }
+            if isMicMuted {
+                micPeakLevel = 0.0
+                micRmsLevel = 0.0
+            }
+            if !isApplyingRemoteSync { pushSyncConfigToPc() }
         }
     }
     @Published public var isSpeakerMuted: Bool = false {
         didSet {
-            networkClient?.sendControlMessage(.muteState(streamId: .pcToPhone, muted: isSpeakerMuted))
+            guard oldValue != isSpeakerMuted else { return }
+            if isSpeakerMuted {
+                pcPeakLevel = 0.0
+                pcRmsLevel = 0.0
+            }
+            if !isApplyingRemoteSync { pushSyncConfigToPc() }
         }
     }
-    @Published public var pushToTalkEnabled: Bool = false
-    @Published public var pushToTalkActive: Bool = false
+    @Published public var pushToTalkEnabled: Bool = false {
+        didSet {
+            guard oldValue != pushToTalkEnabled else { return }
+            if !isApplyingRemoteSync { pushSyncConfigToPc() }
+        }
+    }
+    @Published public var pushToTalkActive: Bool = false {
+        didSet {
+            guard oldValue != pushToTalkActive else { return }
+            if !isApplyingRemoteSync { pushSyncConfigToPc() }
+        }
+    }
 
     @Published public var micGainDb: Float = 0.0 {
-        didSet { pushStreamConfigToPc() }
+        didSet {
+            guard oldValue != micGainDb else { return }
+            if !isApplyingRemoteSync { pushSyncConfigToPc() }
+        }
     }
-    @Published public var speakerVolume: Float = 1.0
+    @Published public var speakerVolume: Float = 1.0 {
+        didSet {
+            guard oldValue != speakerVolume else { return }
+            if !isApplyingRemoteSync { pushSyncConfigToPc() }
+        }
+    }
     @Published public var opusBitrateBps: Int32 = 64_000 {
         didSet {
+            guard oldValue != opusBitrateBps else { return }
             micEncoder?.bitrateBps = opusBitrateBps
-            pushStreamConfigToPc()
+            if !isApplyingRemoteSync { pushSyncConfigToPc() }
         }
     }
     @Published public var frameDurationMs: Int = 10 {
-        didSet { pushStreamConfigToPc() }
-    }
-    @Published public var jitterBufferDepth: Int = 2 {
         didSet {
+            guard oldValue != frameDurationMs else { return }
+            if !isApplyingRemoteSync { pushSyncConfigToPc() }
+        }
+    }
+    @Published public var jitterBufferDepth: Int = 8 {
+        didSet {
+            guard oldValue != jitterBufferDepth else { return }
+            let depth = jitterBufferDepth
             audioQueue.async { [weak self] in
                 guard let self = self else { return }
-                self.pcJitterBuffer.targetDepth = self.jitterBufferDepth
+                self.pcJitterBuffer.targetDepth = depth
             }
-            pushStreamConfigToPc()
+            if !isApplyingRemoteSync { pushSyncConfigToPc() }
+        }
+    }
+    @Published public var aecEnabledOnPc: Bool = true {
+        didSet {
+            guard oldValue != aecEnabledOnPc else { return }
+            if !isApplyingRemoteSync { pushSyncConfigToPc() }
         }
     }
     @Published public var rnnoiseEnabledOnPc: Bool = true {
-        didSet { pushStreamConfigToPc() }
+        didSet {
+            guard oldValue != rnnoiseEnabledOnPc else { return }
+            if !isApplyingRemoteSync { pushSyncConfigToPc() }
+        }
+    }
+    @Published public var vadGateThreshold: Float = 0.15 {
+        didSet {
+            guard oldValue != vadGateThreshold else { return }
+            if !isApplyingRemoteSync { pushSyncConfigToPc() }
+        }
+    }
+    @Published public var iosVoiceProcessingEnabled: Bool = false {
+        didSet {
+            guard oldValue != iosVoiceProcessingEnabled else { return }
+            let enabled = iosVoiceProcessingEnabled
+            audioQueue.async { [weak self] in
+                guard let self = self, self.engineActiveOnQueue else { return }
+                do {
+                    try self.configureAudioSession(voiceProcessing: enabled)
+                    try self.setupAndStartEngineOnQueue(voiceProcessing: enabled)
+                } catch {
+                    self.publishAudioStatus("Voice processing toggle error: \(error.localizedDescription)")
+                }
+            }
+        }
     }
     @Published public var selectedOutputRoute: AudioOutputRoute = .speaker {
         didSet {
@@ -436,10 +512,21 @@ public final class AudioEngineManager: ObservableObject {
     private weak var networkClient: NetworkClient?
     private var micEncoder: SwiftOpusEncoder?
     private var pcDecoder: SwiftOpusDecoder?
-    private let pcJitterBuffer = IosAdaptiveJitterBuffer(targetDepth: 3)
+    private let pcJitterBuffer = IosAdaptiveJitterBuffer(targetDepth: 8)
 
     private var micSampleFifo: [Float] = []
+    private var micFifoHead: Int = 0
+    private var resampleFracPos: Double = 0.0
+    private var resampleLastSample: Float = 0.0
+    private var hasResampleLastSample: Bool = false
     private var playbackFormat: AVAudioFormat?
+
+    private var isApplyingRemoteSync: Bool = false
+    private var syncRevision: UInt64 = 0
+    private var isMicTapInstalled: Bool = false
+    private var engineActiveOnQueue: Bool = false
+    private var phoneToPcActiveOnQueue: Bool = true
+    private var pcToPhoneActiveOnQueue: Bool = true
 
     // UI telemetry rate-limiting timestamps (50ms = ~20 FPS)
     private var lastMicUiUpdateNanoseconds: UInt64 = 0
@@ -470,12 +557,11 @@ public final class AudioEngineManager: ObservableObject {
 
     // MARK: - 1. AVAudioSession Configuration (Full-Fidelity Media Playback & Mic)
 
-    public func configureAudioSession() throws {
+    public func configureAudioSession(voiceProcessing: Bool? = nil) throws {
         let session = AVAudioSession.sharedInstance()
+        let useVoiceProcessing = voiceProcessing ?? iosVoiceProcessingEnabled
+        let mode: AVAudioSession.Mode = useVoiceProcessing ? .voiceChat : .default
 
-        // Configure AVAudioSession with .voiceChat mode and [.defaultToSpeaker, .allowBluetoothHFP, .mixWithOthers, .allowBluetoothA2DP].
-        // .voiceChat activates iOS hardware multi-mic directional beamforming, AGC, and acoustic echo isolation.
-        // .defaultToSpeaker guarantees that loudspeaker output is preserved without dropping volume to receiver earpiece.
         var options: AVAudioSession.CategoryOptions = [
             .defaultToSpeaker,
             .allowBluetoothHFP,
@@ -487,14 +573,13 @@ public final class AudioEngineManager: ObservableObject {
 
         try session.setCategory(
             .playAndRecord,
-            mode: .voiceChat,
+            mode: mode,
             options: options
         )
 
-        // Request 48,000 Hz native hardware clock and 10ms (0.010s) IO buffer duration
-        // 10ms provides smooth uninterrupted streaming without buffer under-runs on iPhone hardware
+        // Request 48,000 Hz native hardware clock and 5ms IO buffer duration
         try session.setPreferredSampleRate(kOpusSampleRate)
-        try session.setPreferredIOBufferDuration(0.010)
+        try session.setPreferredIOBufferDuration(kPreferredIOBufferDuration)
         try session.setActive(true, options: .notifyOthersOnDeactivation)
     }
 
@@ -532,17 +617,22 @@ public final class AudioEngineManager: ObservableObject {
     }
 
     public func start() {
+        let initialVoiceProcessing = iosVoiceProcessingEnabled
+        let initialPhoneToPc = phoneToPcEnabled
+        let initialPcToPhone = pcToPhoneEnabled
         requestMicrophonePermission { [weak self] granted in
             guard let self = self else { return }
             self.audioQueue.async {
-                guard !self.isEngineRunning else { return }
+                guard !self.engineActiveOnQueue else { return }
+                self.phoneToPcActiveOnQueue = initialPhoneToPc
+                self.pcToPhoneActiveOnQueue = initialPcToPhone
                 do {
-                    try self.configureAudioSession()
-                    try self.setupAndStartEngineOnQueue()
+                    try self.configureAudioSession(voiceProcessing: initialVoiceProcessing)
+                    try self.setupAndStartEngineOnQueue(voiceProcessing: initialVoiceProcessing)
                     DispatchQueue.main.async {
                         self.isEngineRunning = true
                         self.audioStatusMessage = granted
-                            ? "48kHz Stereo 16-bit PCM (5ms Buffer)"
+                            ? "48kHz Wideband PCM (5ms Buffer)"
                             : "Mic Permission Denied in Settings"
                     }
                 } catch {
@@ -553,12 +643,14 @@ public final class AudioEngineManager: ObservableObject {
     }
 
     public func stop() {
+        networkClient?.flushOutboundMicQueue()
         audioQueue.async { [weak self] in
             guard let self = self else { return }
-            self.audioEngine.inputNode.removeTap(onBus: 0)
+            self.engineActiveOnQueue = false
+            self.removeMicrophoneTapOnQueue()
             self.playerNode.stop()
             self.audioEngine.stop()
-            self.micSampleFifo.removeAll(keepingCapacity: true)
+            self.resetMicPipelineStateOnQueue()
             self.pcJitterBuffer.reset()
 
             DispatchQueue.main.async {
@@ -572,37 +664,73 @@ public final class AudioEngineManager: ObservableObject {
         }
     }
 
-    private func setupAndStartEngineOnQueue() throws {
-        if audioEngine.isRunning {
-            audioEngine.stop()
+    private func resetMicPipelineStateOnQueue() {
+        micSampleFifo.removeAll(keepingCapacity: true)
+        micFifoHead = 0
+        resampleFracPos = 0.0
+        resampleLastSample = 0.0
+        hasResampleLastSample = false
+    }
+
+    private func applyPhoneToPcPowerState(enabled: Bool) {
+        if !enabled {
+            micPeakLevel = 0.0
+            micRmsLevel = 0.0
+            networkClient?.flushOutboundMicQueue()
         }
-
-        // Attach playerNode for 48kHz Stereo PC audio playback
-        if !audioEngine.attachedNodes.contains(playerNode) {
-            audioEngine.attach(playerNode)
-        }
-
-        guard let stereo48kFormat = AVAudioFormat(
-            standardFormatWithSampleRate: kOpusSampleRate,
-            channels: 2
-        ) else {
-            throw OpusCodecError.initializationFailed("Unable to create 48kHz Stereo AVAudioFormat")
-        }
-        self.playbackFormat = stereo48kFormat
-
-        audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: stereo48kFormat)
-
-        // Configure input node tap for Microphone capture with hardware Voice Processing enabled
-        let inputNode = audioEngine.inputNode
-        do {
-            if #available(iOS 13.0, *) {
-                try inputNode.setVoiceProcessingEnabled(true)
-                print("[AudioEngineManager] Enabled iOS VoiceProcessingIO on inputNode")
+        audioQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.phoneToPcActiveOnQueue = enabled
+            guard self.engineActiveOnQueue else { return }
+            if enabled {
+                self.installMicrophoneTapOnQueue()
+                if !self.audioEngine.isRunning {
+                    self.audioEngine.prepare()
+                    try? self.audioEngine.start()
+                    if self.pcToPhoneActiveOnQueue && !self.playerNode.isPlaying {
+                        self.playerNode.play()
+                    }
+                }
+            } else {
+                self.removeMicrophoneTapOnQueue()
+                self.resetMicPipelineStateOnQueue()
+                if !self.pcToPhoneActiveOnQueue && self.audioEngine.isRunning {
+                    self.audioEngine.pause()
+                }
             }
-        } catch {
-            print("[AudioEngineManager] Failed to enable VoiceProcessingIO on inputNode: \(error.localizedDescription)")
         }
+    }
 
+    private func applyPcToPhonePowerState(enabled: Bool) {
+        if !enabled {
+            pcPeakLevel = 0.0
+            pcRmsLevel = 0.0
+        }
+        audioQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.pcToPhoneActiveOnQueue = enabled
+            guard self.engineActiveOnQueue else { return }
+            if enabled {
+                if !self.audioEngine.isRunning {
+                    self.audioEngine.prepare()
+                    try? self.audioEngine.start()
+                }
+                if !self.playerNode.isPlaying && self.audioEngine.isRunning {
+                    self.playerNode.play()
+                }
+            } else {
+                self.playerNode.stop()
+                self.pcJitterBuffer.reset()
+                if !self.phoneToPcActiveOnQueue && self.audioEngine.isRunning {
+                    self.audioEngine.pause()
+                }
+            }
+        }
+    }
+
+    private func installMicrophoneTapOnQueue() {
+        guard !isMicTapInstalled else { return }
+        let inputNode = audioEngine.inputNode
         let hwInputFormat = inputNode.inputFormat(forBus: 0)
         let hwSampleRate = hwInputFormat.sampleRate > 0 ? hwInputFormat.sampleRate : kOpusSampleRate
         let hwChannels = max(1, Int(hwInputFormat.channelCount))
@@ -619,18 +747,59 @@ public final class AudioEngineManager: ObservableObject {
                 sourceChannels: hwChannels
             )
         }
+        isMicTapInstalled = true
+    }
+
+    private func removeMicrophoneTapOnQueue() {
+        guard isMicTapInstalled else { return }
+        audioEngine.inputNode.removeTap(onBus: 0)
+        isMicTapInstalled = false
+    }
+
+    private func setupAndStartEngineOnQueue(voiceProcessing: Bool? = nil) throws {
+        if audioEngine.isRunning {
+            audioEngine.stop()
+        }
+        removeMicrophoneTapOnQueue()
+
+        // Attach playerNode for 48kHz Stereo PC audio playback
+        if !audioEngine.attachedNodes.contains(playerNode) {
+            audioEngine.attach(playerNode)
+        }
+
+        guard let stereo48kFormat = AVAudioFormat(
+            standardFormatWithSampleRate: kOpusSampleRate,
+            channels: 2
+        ) else {
+            throw OpusCodecError.initializationFailed("Unable to create 48kHz Stereo AVAudioFormat")
+        }
+        self.playbackFormat = stereo48kFormat
+
+        audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: stereo48kFormat)
+
+        // Configure input node voice processing per user setting (defaults to false for clean 48kHz wideband)
+        let inputNode = audioEngine.inputNode
+        let useVoiceProcessing = voiceProcessing ?? iosVoiceProcessingEnabled
+        if #available(iOS 13.0, *) {
+            do {
+                try inputNode.setVoiceProcessingEnabled(useVoiceProcessing)
+            } catch {
+                print("[AudioEngineManager] Failed to configure VoiceProcessingIO on inputNode: \(error.localizedDescription)")
+            }
+        }
+
+        if phoneToPcActiveOnQueue {
+            installMicrophoneTapOnQueue()
+        }
 
         audioEngine.prepare()
-        try audioEngine.start()
-        playerNode.play()
-
-        // DIAG
-        let s = AVAudioSession.sharedInstance()
-        print("[DIAG iOS CFG] session.sampleRate=\(s.sampleRate) preferredSR=\(s.preferredSampleRate) ioBufferDuration=\(s.ioBufferDuration)s (\(Int(s.ioBufferDuration * s.sampleRate)) frames) inputLatency=\(s.inputLatency) inputCh=\(s.inputNumberOfChannels) mode=\(s.mode.rawValue)")
-        print("[DIAG iOS CFG] inputs=\(s.currentRoute.inputs.map { "\($0.portType.rawValue):\($0.portName)" }) outputs=\(s.currentRoute.outputs.map { $0.portType.rawValue })")
-        print("[DIAG iOS CFG] hwInputFormat=\(hwInputFormat) interleaved=\(hwInputFormat.isInterleaved) commonFormat=\(hwInputFormat.commonFormat.rawValue) tapRequestedFrames=\(tapBufferFrames) resamplePath=\(abs(hwSampleRate - kOpusSampleRate) >= 1.0) frameDurationMs=\(frameDurationMs) micGainDb=\(micGainDb)")
-        print("[DIAG iOS CFG] lowPowerMode=\(ProcessInfo.processInfo.isLowPowerModeEnabled) thermal=\(ProcessInfo.processInfo.thermalState.rawValue)")
-        MicDiag.shared.start()
+        if phoneToPcActiveOnQueue || pcToPhoneActiveOnQueue {
+            try audioEngine.start()
+            if pcToPhoneActiveOnQueue {
+                playerNode.play()
+            }
+        }
+        engineActiveOnQueue = true
 
         // Explicitly enforce the output route immediately after engine starts
         updateAudioOutputRoute()
@@ -650,8 +819,6 @@ public final class AudioEngineManager: ObservableObject {
             && !isMicMuted
             && (!pushToTalkEnabled || pushToTalkActive)
 
-        MicDiag.shared.onTap(frames: frameCount, gated: !canTransmit) // DIAG
-
         if !canTransmit {
             DispatchQueue.main.async {
                 self.micPeakLevel = 0.0
@@ -662,72 +829,77 @@ public final class AudioEngineManager: ObservableObject {
 
         let srcChannel0 = channelData[0]
         let gainLinear = powf(10.0, micGainDb / 20.0)
-
-        // DIAG: snapshot while the buffer is guaranteed valid (we are still inside the tap block)
-        let diagEnqueuedNs = MicDiag.nowNs()
-        let diagSnapshot = Array(UnsafeBufferPointer(start: srcChannel0, count: frameCount))
+        // Snapshot while the tap buffer is guaranteed valid inside the callback
+        let capturedSamples = Array(UnsafeBufferPointer(start: srcChannel0, count: frameCount))
 
         audioQueue.async { [weak self] in
-            guard let self = self else { return }
-
-            // DIAG: did the tap buffer's memory change after the tap block returned? (tests H1)
-            let diagChanged = diagSnapshot.withUnsafeBufferPointer { snap in
-                guard let snapBase = snap.baseAddress else { return false }
-                return memcmp(snapBase, srcChannel0, frameCount * MemoryLayout<Float>.size) != 0
-            }
-            MicDiag.shared.onHandoff(enqueuedNs: diagEnqueuedNs, bufferChangedAfterTapReturned: diagChanged)
+            guard let self = self, self.phoneToPcActiveOnQueue else { return }
 
             if abs(sourceRate - kOpusSampleRate) < 1.0 {
                 for i in 0..<frameCount {
-                    let boosted = tanh(diagSnapshot[i] * gainLinear)
+                    let boosted = tanh(capturedSamples[i] * gainLinear)
                     self.micSampleFifo.append(boosted)
                 }
+                self.resampleLastSample = capturedSamples[frameCount - 1]
+                self.hasResampleLastSample = true
             } else {
-                // Linear resampling from hardware input rate to 48,000 Hz mono
-                let ratio = sourceRate / kOpusSampleRate
-                let outFrames = Int(floor(Double(frameCount) / ratio))
-                for outIdx in 0..<outFrames {
-                    let srcPos = Double(outIdx) * ratio
-                    let idx0 = min(Int(floor(srcPos)), frameCount - 1)
-                    let idx1 = min(idx0 + 1, frameCount - 1)
-                    let frac = Float(srcPos - Double(idx0))
-                    let s0 = diagSnapshot[idx0]
-                    let s1 = diagSnapshot[idx1]
-                    let interpolated = s0 + (s1 - s0) * frac
-                    let boosted = tanh(interpolated * gainLinear)
-                    self.micSampleFifo.append(boosted)
+                // Phase-continuous linear resampling across tap buffer boundaries
+                let step = sourceRate / kOpusSampleRate
+                if !self.hasResampleLastSample {
+                    self.resampleLastSample = capturedSamples[0]
+                    self.hasResampleLastSample = true
                 }
+                var pos = self.resampleFracPos
+                while pos < Double(frameCount) {
+                    let idx = Int(floor(pos))
+                    let frac = Float(pos - Double(idx))
+                    let s0: Float = (idx == 0) ? self.resampleLastSample : capturedSamples[idx - 1]
+                    let s1: Float = capturedSamples[idx]
+                    let interpolated = s0 + (s1 - s0) * frac
+                    self.micSampleFifo.append(tanh(interpolated * gainLinear))
+                    pos += step
+                }
+                self.resampleFracPos = pos - Double(frameCount)
+                self.resampleLastSample = capturedSamples[frameCount - 1]
             }
 
             let targetFrameSamples = (self.frameDurationMs == 20) ? kFrameSamples20ms : kFrameSamples10ms
 
-            while self.micSampleFifo.count >= targetFrameSamples {
-                MicDiag.shared.onFramePacked(fifoCount: self.micSampleFifo.count) // DIAG
-                let pcmFrame = Array(self.micSampleFifo.prefix(targetFrameSamples))
-                self.micSampleFifo.removeFirst(targetFrameSamples)
+            while (self.micSampleFifo.count - self.micFifoHead) >= targetFrameSamples {
+                let frameSlice = self.micSampleFifo[self.micFifoHead..<(self.micFifoHead + targetFrameSamples)]
+                self.micFifoHead += targetFrameSamples
 
                 let nowNs = DispatchTime.now().uptimeNanoseconds
                 if nowNs &- self.lastMicUiUpdateNanoseconds >= 50_000_000 {
                     self.lastMicUiUpdateNanoseconds = nowNs
-                    let (peak, rms) = Self.computePeakAndRms(pcmFrame)
+                    let (peak, rms) = Self.computePeakAndRms(frameSlice)
                     DispatchQueue.main.async {
                         self.micPeakLevel = peak
                         self.micRmsLevel = rms
                     }
                 }
 
-                // Pack into pristine 16-bit Mono Little-Endian PCM with direct contiguous unsafe pointer write (zero per-sample allocations)
+                // Pack into pristine 16-bit Mono Little-Endian PCM with direct contiguous unsafe pointer write
                 var pcm16Data = Data(count: targetFrameSamples * 2)
                 pcm16Data.withUnsafeMutableBytes { rawBuf in
                     guard let dstPtr = rawBuf.bindMemory(to: Int16.self).baseAddress else { return }
-                    for i in 0..<targetFrameSamples {
-                        let s = pcmFrame[i]
+                    var i = 0
+                    for s in frameSlice {
                         let clamped = min(max(s, -1.0), 1.0)
                         let s16 = Int16(clamped * 32767.0)
                         dstPtr[i] = s16.littleEndian
+                        i += 1
                     }
                 }
                 self.networkClient?.sendMicrophoneOpusFrame(pcm16Data)
+            }
+
+            if self.micFifoHead >= kFrameSamples20ms * 4 {
+                self.micSampleFifo.removeFirst(self.micFifoHead)
+                self.micFifoHead = 0
+            } else if self.micFifoHead == self.micSampleFifo.count {
+                self.micSampleFifo.removeAll(keepingCapacity: true)
+                self.micFifoHead = 0
             }
         }
     }
@@ -747,21 +919,46 @@ public final class AudioEngineManager: ObservableObject {
             DispatchQueue.main.async {
                 switch controlMsg {
                 case let .handshakeAck(_, pcToPhone, phoneToPc, bitrate):
+                    self.isApplyingRemoteSync = true
+                    defer { self.isApplyingRemoteSync = false }
                     self.pcToPhoneEnabled = pcToPhone
                     self.phoneToPcEnabled = phoneToPc
                     self.opusBitrateBps = bitrate
                 case let .muteState(streamId, muted):
+                    self.isApplyingRemoteSync = true
+                    defer { self.isApplyingRemoteSync = false }
                     if streamId == .pcToPhone {
                         self.isSpeakerMuted = muted
                     } else if streamId == .phoneToPc {
                         self.isMicMuted = muted
                     }
                 case let .streamConfig(bitrate, frameMs, jitter, rnnoise, gain):
+                    self.isApplyingRemoteSync = true
+                    defer { self.isApplyingRemoteSync = false }
                     self.opusBitrateBps = bitrate
                     self.frameDurationMs = Int(frameMs)
                     self.jitterBufferDepth = jitter
                     self.rnnoiseEnabledOnPc = rnnoise
                     self.micGainDb = gain
+                case let .syncConfig(sync):
+                    guard sync.revision >= self.syncRevision else { return }
+                    self.syncRevision = sync.revision
+                    self.isApplyingRemoteSync = true
+                    defer { self.isApplyingRemoteSync = false }
+                    self.pcToPhoneEnabled = sync.pcToPhoneEnabled
+                    self.phoneToPcEnabled = sync.phoneToPcEnabled
+                    self.isSpeakerMuted = sync.pcMuted
+                    self.isMicMuted = sync.micMuted
+                    self.pushToTalkEnabled = sync.pushToTalkEnabled
+                    self.pushToTalkActive = sync.pushToTalkActive
+                    self.aecEnabledOnPc = sync.aecEnabled
+                    self.rnnoiseEnabledOnPc = sync.rnnoiseEnabled
+                    self.vadGateThreshold = sync.vadGateThreshold
+                    self.micGainDb = sync.micGainDb
+                    self.speakerVolume = sync.pcVolume
+                    self.opusBitrateBps = sync.opusBitrateBps
+                    self.frameDurationMs = Int(sync.frameDurationMs)
+                    self.jitterBufferDepth = sync.jitterBufferPackets
                 default:
                     break
                 }
@@ -770,7 +967,7 @@ public final class AudioEngineManager: ObservableObject {
     }
 
     private func handleInboundPcAudioPacketOnQueue(_ packet: FramedPacket) {
-        guard pcToPhoneEnabled && !isSpeakerMuted else {
+        guard pcToPhoneActiveOnQueue && !isSpeakerMuted else {
             DispatchQueue.main.async {
                 self.pcPeakLevel = 0.0
                 self.pcRmsLevel = 0.0
@@ -844,20 +1041,31 @@ public final class AudioEngineManager: ObservableObject {
 
     // MARK: - Helpers & Interruption Recovery
 
-    private func pushStreamConfigToPc() {
-        networkClient?.sendControlMessage(
-            .streamConfig(
-                opusBitrate: opusBitrateBps,
-                frameDurationMs: UInt8(frameDurationMs),
-                jitterCapacity: jitterBufferDepth,
-                noiseSuppressionEnabled: rnnoiseEnabledOnPc,
-                gainDb: micGainDb
-            )
+    private func pushSyncConfigToPc() {
+        guard let client = networkClient, client.isConnected else { return }
+        syncRevision &+= 1
+        let payload = SyncConfigPayload(
+            revision: syncRevision,
+            pcToPhoneEnabled: pcToPhoneEnabled,
+            phoneToPcEnabled: phoneToPcEnabled,
+            pcMuted: isSpeakerMuted,
+            micMuted: isMicMuted,
+            pushToTalkEnabled: pushToTalkEnabled,
+            pushToTalkActive: pushToTalkActive,
+            aecEnabled: aecEnabledOnPc,
+            rnnoiseEnabled: rnnoiseEnabledOnPc,
+            vadGateThreshold: vadGateThreshold,
+            micGainDb: micGainDb,
+            pcVolume: speakerVolume,
+            opusBitrateBps: opusBitrateBps,
+            frameDurationMs: UInt8(frameDurationMs == 20 ? 20 : 10),
+            jitterBufferPackets: jitterBufferDepth
         )
+        client.sendControlMessage(.syncConfig(payload))
     }
 
     @inline(__always)
-    private static func computePeakAndRms(_ samples: [Float]) -> (Float, Float) {
+    private static func computePeakAndRms<C: Collection>(_ samples: C) -> (Float, Float) where C.Element == Float {
         guard !samples.isEmpty else { return (0.0, 0.0) }
         var peak: Float = 0.0
         var sumSq: Float = 0.0
@@ -885,6 +1093,7 @@ public final class AudioEngineManager: ObservableObject {
             if type == .ended {
                 // Automatically resume AVAudioSession & AVAudioEngine after phone call or Siri interruption
                 self.audioQueue.async {
+                    guard self.engineActiveOnQueue else { return }
                     try? self.configureAudioSession()
                     try? self.setupAndStartEngineOnQueue()
                 }
@@ -898,11 +1107,13 @@ public final class AudioEngineManager: ObservableObject {
         ) { [weak self] _ in
             guard let self = self else { return }
             self.checkBluetoothConnectionStatus()
-            if self.isEngineRunning {
-                self.audioQueue.async {
-                    if !self.audioEngine.isRunning {
-                        try? self.setupAndStartEngineOnQueue()
-                    }
+            self.audioQueue.async {
+                guard self.engineActiveOnQueue,
+                      (self.phoneToPcActiveOnQueue || self.pcToPhoneActiveOnQueue) else {
+                    return
+                }
+                if !self.audioEngine.isRunning {
+                    try? self.setupAndStartEngineOnQueue()
                 }
             }
         }

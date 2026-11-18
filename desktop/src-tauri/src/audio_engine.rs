@@ -43,7 +43,7 @@ pub enum AudioEngineError {
 }
 
 /// Live audio runtime configuration shared between Tauri UI, Global Hotkeys, and DSP threads.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AudioConfig {
     /// Stream PC desktop loopback audio to iPhone.
     pub pc_to_phone_enabled: bool,
@@ -100,7 +100,7 @@ impl Default for AudioConfig {
 }
 
 /// Real-time VU meter & DSP telemetry snapshot.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct AudioLevels {
     pub pc_peak: f32,
     pub pc_rms: f32,
@@ -182,13 +182,11 @@ impl AdaptiveJitterBuffer {
         if let Some(expected) = self.next_expected_seq {
             let diff = sequence_diff(seq, expected);
             if diff < -32 {
-                crate::diag::inc(&crate::diag::JB_RESETS); // DIAG
                 // Stream likely restarted on the iPhone client; reset sequence tracking.
                 self.packets.clear();
                 self.next_expected_seq = Some(seq);
                 self.primed = false;
             } else if diff < 0 {
-                crate::diag::inc(&crate::diag::JB_LATE_DROPS); // DIAG
                 // Late packet that has already been concealed/played; drop it.
                 return;
             }
@@ -200,7 +198,6 @@ impl AdaptiveJitterBuffer {
 
         // Bound maximum jitter buffer memory if a burst arrives.
         while self.packets.len() > self.max_capacity {
-            crate::diag::inc(&crate::diag::JB_OVERFLOW_DROPS); // DIAG
             if let Some(expected) = self.next_expected_seq {
                 self.packets.remove(&expected);
                 self.next_expected_seq = Some(expected.wrapping_add(1));
@@ -209,10 +206,15 @@ impl AdaptiveJitterBuffer {
             }
         }
 
-        crate::diag::set_max(&crate::diag::JB_DEPTH_MAX, self.packets.len() as u64); // DIAG
         if self.packets.len() >= self.target_depth {
             self.primed = true;
         }
+    }
+
+    pub fn reset(&mut self) {
+        self.packets.clear();
+        self.next_expected_seq = None;
+        self.primed = false;
     }
 
     pub fn pop_next(&mut self) -> JitterPopResult {
@@ -273,6 +275,8 @@ pub struct MicDspPipeline {
     aec: Option<AudioProcessing>,
     jitter: AdaptiveJitterBuffer,
     rnnoise_input_fifo: VecDeque<f32>,
+    render_staging_fifo: VecDeque<[f32; FRAME_SAMPLES_10MS]>,
+    vad_envelope: f32,
 }
 
 impl MicDspPipeline {
@@ -296,7 +300,16 @@ impl MicDspPipeline {
             aec,
             jitter: AdaptiveJitterBuffer::new(jitter_depth),
             rnnoise_input_fifo: VecDeque::with_capacity(FRAME_SAMPLES_10MS * 4),
+            render_staging_fifo: VecDeque::with_capacity(48),
+            vad_envelope: 1.0,
         })
+    }
+
+    pub fn reset(&mut self) {
+        self.jitter.reset();
+        self.rnnoise_input_fifo.clear();
+        self.render_staging_fifo.clear();
+        self.vad_envelope = 1.0;
     }
 
     /// Pushes an incoming UDP `PhoneToPc` packet into the jitter buffer.
@@ -313,34 +326,31 @@ impl MicDspPipeline {
         config: &AudioConfig,
         telemetry: &AtomicAudioTelemetry,
         output_ring: &Mutex<OutputRingState>,
-        render_ref_rx: &std::sync::mpsc::Receiver<Vec<f32>>,
+        render_ref_rx: &std::sync::mpsc::Receiver<[f32; FRAME_SAMPLES_10MS]>,
     ) {
-        // Drain pending render reference frames from WASAPI loopback into AEC3
-        if let Some(apm) = &mut self.aec {
-            if config.aec_enabled {
-                while let Ok(render_frame) = render_ref_rx.try_recv() {
-                    if render_frame.len() == FRAME_SAMPLES_10MS {
-                        let mut render_out = [0.0f32; FRAME_SAMPLES_10MS];
-                        let _ = apm.process_render_f32(&[&render_frame], &mut [&mut render_out]);
-                    }
-                }
-            } else {
-                while render_ref_rx.try_recv().is_ok() {}
+        // Stage pending 10ms render reference frames from WASAPI loopback (bounded to ~400ms)
+        if config.aec_enabled {
+            while let Ok(render_frame) = render_ref_rx.try_recv() {
+                self.render_staging_fifo.push_back(render_frame);
             }
+            while self.render_staging_fifo.len() > 40 {
+                self.render_staging_fifo.pop_front();
+            }
+        } else {
+            while render_ref_rx.try_recv().is_ok() {}
+            self.render_staging_fifo.clear();
         }
 
         loop {
             match self.jitter.pop_next() {
                 JitterPopResult::NotReady => break,
                 JitterPopResult::Frame(pcm16_bytes) => {
-                    crate::diag::inc(&crate::diag::JB_FRAMES); // DIAG
                     for chunk in pcm16_bytes.chunks_exact(2) {
                         let s16 = i16::from_le_bytes([chunk[0], chunk[1]]);
                         self.rnnoise_input_fifo.push_back(s16 as f32 / 32768.0);
                     }
                 }
                 JitterPopResult::LostPacket => {
-                    crate::diag::inc(&crate::diag::JB_LOST); // DIAG
                     // Smooth concealment: smoothly decay from the last valid sample rather than abrupt silence step
                     let last_sample = self.rnnoise_input_fifo.back().copied().unwrap_or(0.0);
                     for i in 0..FRAME_SAMPLES_10MS {
@@ -366,6 +376,9 @@ impl MicDspPipeline {
             }
 
             if !is_active {
+                if config.aec_enabled && !self.render_staging_fifo.is_empty() {
+                    let _ = self.render_staging_fifo.pop_front();
+                }
                 telemetry.store_mic_levels(0.0, 0.0, 0.0);
                 let mut guard = output_ring.lock();
                 for _ in 0..FRAME_SAMPLES_10MS {
@@ -376,10 +389,24 @@ impl MicDspPipeline {
                 continue;
             }
 
-            // 1. WebRTC AEC3 Acoustic Echo Cancellation (subtracts PC desktop speaker audio picked up by phone mic)
+            // 1. WebRTC AEC3 Acoustic Echo Cancellation (synchronized 1:1 10ms render/capture cadence)
             let mut aec_cleaned = [0.0f32; FRAME_SAMPLES_10MS];
             if config.aec_enabled {
                 if let Some(apm) = &mut self.aec {
+                    // Gently trim excess stale backlog if render queue drifted ahead
+                    if self.render_staging_fifo.len() > 20 {
+                        self.render_staging_fifo.pop_front();
+                    }
+                    let render_frame = self
+                        .render_staging_fifo
+                        .pop_front()
+                        .unwrap_or([0.0f32; FRAME_SAMPLES_10MS]);
+                    let mut render_out = [0.0f32; FRAME_SAMPLES_10MS];
+                    let _ = apm.process_render_f32(&[&render_frame], &mut [&mut render_out]);
+
+                    let delay_ms = ((config.jitter_buffer_packets * 10) + 30).clamp(0, 500) as i32;
+                    let _ = apm.set_stream_delay_ms(delay_ms);
+
                     let mut dest = [0.0f32; FRAME_SAMPLES_10MS];
                     if apm.process_capture_f32(&[&raw_frame], &mut [&mut dest]).is_ok() {
                         aec_cleaned.copy_from_slice(&dest);
@@ -393,7 +420,7 @@ impl MicDspPipeline {
                 aec_cleaned.copy_from_slice(&raw_frame);
             }
 
-            // 2. AI Noise Suppression (RNNoise) on AEC-cleaned stream
+            // 2. AI Noise Suppression (RNNoise) on AEC-cleaned stream with smoothed VAD gate
             let mut processed_frame = [0.0f32; FRAME_SAMPLES_10MS];
             let vad_prob = if config.rnnoise_enabled {
                 // `nnnoiseless` operates on 16-bit PCM amplitude scale (-32768.0..32767.0)
@@ -403,23 +430,29 @@ impl MicDspPipeline {
                     scaled_in[i] = (aec_cleaned[i] * 32768.0).clamp(-32768.0, 32767.0);
                 }
                 let vad = self.rnnoise.process_frame(&mut scaled_out, &scaled_in);
-                let gate_factor = if vad < config.vad_gate_threshold {
-                    (vad / config.vad_gate_threshold.max(0.01)).powi(2)
-                } else {
+                let gate_factor = if config.vad_gate_threshold <= 0.001 {
+                    self.vad_envelope = 1.0;
                     1.0
+                } else {
+                    let target_gate = if vad >= config.vad_gate_threshold {
+                        1.0
+                    } else {
+                        let ratio = (vad / config.vad_gate_threshold.max(0.01)).clamp(0.0, 1.0);
+                        (ratio * ratio).max(0.05)
+                    };
+                    if target_gate >= self.vad_envelope {
+                        self.vad_envelope = 0.35 * self.vad_envelope + 0.65 * target_gate;
+                    } else {
+                        self.vad_envelope = 0.82 * self.vad_envelope + 0.18 * target_gate;
+                    }
+                    self.vad_envelope.max(0.05)
                 };
-                let diag_gated = gate_factor < 0.5; // DIAG
-                if diag_gated {
-                    crate::diag::inc(&crate::diag::VAD_GATED_FRAMES);
-                } // DIAG
-                if crate::diag::PREV_GATED.swap(diag_gated, Ordering::Relaxed) != diag_gated {
-                    crate::diag::inc(&crate::diag::VAD_GATE_TOGGLES); // DIAG
-                }
                 for i in 0..FRAME_SAMPLES_10MS {
                     processed_frame[i] = (scaled_out[i] / 32768.0) * gate_factor;
                 }
                 vad
             } else {
+                self.vad_envelope = 1.0;
                 processed_frame.copy_from_slice(&aec_cleaned);
                 1.0
             };
@@ -439,17 +472,13 @@ impl MicDspPipeline {
             let rms = (sum_sq / FRAME_SAMPLES_10MS as f32).sqrt();
             telemetry.store_mic_levels(peak, rms, vad_prob);
 
-            crate::diag::dump_dsp(&processed_frame); // DIAG (outside lock)
             let mut guard = output_ring.lock();
             // Bound ring buffer latency to 500ms max (24,000 samples at 48kHz) so bursts of 100-150ms are never trimmed
             let max_ring_samples = (OPUS_SAMPLE_RATE as usize * 50) / 100;
             while guard.ring.len() + FRAME_SAMPLES_10MS > max_ring_samples {
                 guard.ring.pop_front();
-                crate::diag::inc(&crate::diag::RING_TRIM_SAMPLES); // DIAG
             }
             guard.ring.extend(processed_frame);
-            crate::diag::set_max(&crate::diag::RING_HIGH_WATER, guard.ring.len() as u64); // DIAG
-            crate::diag::inc(&crate::diag::DSP_FRAMES); // DIAG
         }
     }
 }
@@ -567,7 +596,8 @@ impl AudioEngine {
             return Ok(());
         }
 
-        let (render_ref_tx, render_ref_rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(64);
+        let (render_ref_tx, render_ref_rx) =
+            std::sync::mpsc::sync_channel::<[f32; FRAME_SAMPLES_10MS]>(64);
 
         let running_loopback = Arc::clone(&self.running);
         let config_loopback = Arc::clone(&self.config);
@@ -624,7 +654,7 @@ fn run_wasapi_loopback_worker(
     config: Arc<Mutex<AudioConfig>>,
     telemetry: Arc<AtomicAudioTelemetry>,
     outbound_opus_tx: mpsc::Sender<Vec<u8>>,
-    render_ref_tx: std::sync::mpsc::SyncSender<Vec<f32>>,
+    render_ref_tx: std::sync::mpsc::SyncSender<[f32; FRAME_SAMPLES_10MS]>,
 ) -> Result<(), AudioEngineError> {
     let host = cpal::default_host();
     // On Windows WASAPI, building an *input* stream on an *output* device opens it in Loopback mode!
@@ -710,13 +740,34 @@ fn run_wasapi_loopback_worker(
 
     let mut stereo_48k_fifo: VecDeque<f32> = VecDeque::with_capacity(OPUS_SAMPLE_RATE as usize * 2);
     let mut mono_render_fifo: VecDeque<f32> = VecDeque::with_capacity(FRAME_SAMPLES_10MS * 4);
+    let mut stream_paused = false;
 
     while running.load(Ordering::Relaxed) {
+        let cfg_snapshot = config.lock().clone();
+        let need_aec = cfg_snapshot.aec_enabled && cfg_snapshot.phone_to_pc_enabled;
+        let need_loopback = cfg_snapshot.pc_to_phone_enabled || need_aec;
+
+        if !need_loopback {
+            if !stream_paused {
+                let _ = stream.pause();
+                stream_paused = true;
+            }
+            telemetry.store_pc_levels(0.0, 0.0);
+            stereo_48k_fifo.clear();
+            mono_render_fifo.clear();
+            while pcm_rx.try_recv().is_ok() {}
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            continue;
+        } else if stream_paused {
+            let _ = stream.play();
+            stream_paused = false;
+        }
+
         match pcm_rx.recv_timeout(std::time::Duration::from_millis(25)) {
             Ok(raw_interleaved) => {
                 let cfg_snapshot = config.lock().clone();
                 let need_opus = cfg_snapshot.pc_to_phone_enabled && !cfg_snapshot.pc_muted;
-                let need_aec = cfg_snapshot.aec_enabled;
+                let need_aec = cfg_snapshot.aec_enabled && cfg_snapshot.phone_to_pc_enabled;
 
                 if !need_opus && !need_aec {
                     telemetry.store_pc_levels(0.0, 0.0);
@@ -737,9 +788,10 @@ fn run_wasapi_loopback_worker(
                 // 5ms = 240 stereo frames (480 interleaved f32 = 960 bytes PCM16)
                 let frame_samples_per_ch = FRAME_SAMPLES_5MS;
                 let interleaved_frame_len = frame_samples_per_ch * 2;
+                let mut pcm_frame = [0.0f32; FRAME_SAMPLES_5MS * 2];
+                let mut render_10ms = [0.0f32; FRAME_SAMPLES_10MS];
 
                 while stereo_48k_fifo.len() >= interleaved_frame_len {
-                    let mut pcm_frame = vec![0.0f32; interleaved_frame_len];
                     for slot in &mut pcm_frame {
                         *slot = stereo_48k_fifo.pop_front().unwrap_or(0.0);
                     }
@@ -759,7 +811,6 @@ fn run_wasapi_loopback_worker(
                             mono_render_fifo.push_back((l + r) * 0.5);
                         }
                         while mono_render_fifo.len() >= FRAME_SAMPLES_10MS {
-                            let mut render_10ms = vec![0.0f32; FRAME_SAMPLES_10MS];
                             for slot in &mut render_10ms {
                                 *slot = mono_render_fifo.pop_front().unwrap_or(0.0);
                             }
@@ -797,7 +848,7 @@ fn run_vbcable_mic_worker(
     vbcable_name_slot: Arc<Mutex<String>>,
     vbcable_flag_slot: Arc<AtomicBool>,
     inbound_mic_rx: &mut mpsc::Receiver<FramedPacket>,
-    render_ref_rx: std::sync::mpsc::Receiver<Vec<f32>>,
+    render_ref_rx: std::sync::mpsc::Receiver<[f32; FRAME_SAMPLES_10MS]>,
 ) -> Result<(), AudioEngineError> {
     let hint = config.lock().virtual_mic_device_hint.clone();
     let (output_device, dev_name, is_vbcable) = find_vbcable_output_device(&hint)?;
@@ -811,22 +862,6 @@ fn run_vbcable_mic_worker(
     let out_format = supported_cfg.sample_format();
     let out_rate = supported_cfg.sample_rate().0;
     let out_channels = supported_cfg.channels() as usize;
-
-    crate::diag::emit(format!(
-        "[DIAG CFG] out_device='{}' is_vbcable={} default_fmt={:?} rate={} ch={} buf_range={:?} requested=Fixed({})",
-        vbcable_name_slot.lock(),
-        is_vbcable,
-        out_format,
-        out_rate,
-        out_channels,
-        supported_cfg.buffer_size(),
-        (out_rate / 200).max(128)
-    ));
-    if let Ok(cfgs) = output_device.supported_output_configs() {
-        for c in cfgs {
-            crate::diag::emit(format!("[DIAG CFG]   supported: {:?}", c));
-        }
-    }
 
     let preferred_frames = (out_rate / 200).max(128);
     let low_latency_cfg = StreamConfig {
@@ -842,7 +877,6 @@ fn run_vbcable_mic_worker(
 
     let err_fn = |err| {
         log::warn!("VB-CABLE output stream error: {err}");
-        crate::diag::emit(format!("[DIAG ERR] VB-CABLE output stream error: {err}")); // DIAG
     };
 
     let build_output = |stream_cfg: &StreamConfig| -> Result<cpal::Stream, cpal::BuildStreamError> {
@@ -861,55 +895,52 @@ fn run_vbcable_mic_worker(
                 err_fn,
                 None,
             ),
-            SampleFormat::I16 => output_device.build_output_stream(
-                stream_cfg,
-                move |data: &mut [i16], _| {
-                    if !is_vbcable {
-                        data.fill(0);
-                    } else {
-                        let mut temp = vec![0.0f32; data.len()];
-                        fill_output_buffer_f32(&mut temp, out_channels, out_rate, &ring);
-                        for (dst, &src) in data.iter_mut().zip(temp.iter()) {
-                            *dst = (src * 32767.0).clamp(-32768.0, 32767.0) as i16;
+            SampleFormat::I16 => {
+                let mut temp = Vec::<f32>::with_capacity(4096);
+                output_device.build_output_stream(
+                    stream_cfg,
+                    move |data: &mut [i16], _| {
+                        if !is_vbcable {
+                            data.fill(0);
+                        } else {
+                            temp.resize(data.len(), 0.0);
+                            fill_output_buffer_f32(&mut temp, out_channels, out_rate, &ring);
+                            for (dst, &src) in data.iter_mut().zip(temp.iter()) {
+                                *dst = (src * 32767.0).clamp(-32768.0, 32767.0) as i16;
+                            }
                         }
-                    }
-                },
-                err_fn,
-                None,
-            ),
-            SampleFormat::U16 => output_device.build_output_stream(
-                stream_cfg,
-                move |data: &mut [u16], _| {
-                    if !is_vbcable {
-                        data.fill(32768);
-                    } else {
-                        let mut temp = vec![0.0f32; data.len()];
-                        fill_output_buffer_f32(&mut temp, out_channels, out_rate, &ring);
-                        for (dst, &src) in data.iter_mut().zip(temp.iter()) {
-                            *dst = ((src * 32767.0) + 32768.0).clamp(0.0, 65535.0) as u16;
+                    },
+                    err_fn,
+                    None,
+                )
+            }
+            SampleFormat::U16 => {
+                let mut temp = Vec::<f32>::with_capacity(4096);
+                output_device.build_output_stream(
+                    stream_cfg,
+                    move |data: &mut [u16], _| {
+                        if !is_vbcable {
+                            data.fill(32768);
+                        } else {
+                            temp.resize(data.len(), 0.0);
+                            fill_output_buffer_f32(&mut temp, out_channels, out_rate, &ring);
+                            for (dst, &src) in data.iter_mut().zip(temp.iter()) {
+                                *dst = ((src * 32767.0) + 32768.0).clamp(0.0, 65535.0) as u16;
+                            }
                         }
-                    }
-                },
-                err_fn,
-                None,
-            ),
+                    },
+                    err_fn,
+                    None,
+                )
+            }
             _ => Err(cpal::BuildStreamError::StreamConfigNotSupported),
         }
     };
 
     let stream = match build_output(&low_latency_cfg) {
-        Ok(s) => {
-            crate::diag::emit(format!(
-                "[DIAG CFG] opened LOW-LATENCY cfg {:?}",
-                low_latency_cfg
-            ));
-            s
-        }
+        Ok(s) => s,
         Err(e) => {
-            crate::diag::emit(format!(
-                "[DIAG CFG] low-latency rejected ({e}); using DEFAULT cfg {:?}",
-                default_cfg
-            ));
+            log::info!("Low-latency VB-CABLE config rejected ({e}); falling back to default config");
             build_output(&default_cfg)
                 .map_err(|e| AudioEngineError::BuildStreamError(e.to_string()))?
         }
@@ -919,21 +950,48 @@ fn run_vbcable_mic_worker(
         .play()
         .map_err(|e| AudioEngineError::PlayStreamError(e.to_string()))?;
 
-    let initial_jitter = config.lock().jitter_buffer_packets.max(8);
+    let initial_jitter = config.lock().jitter_buffer_packets.clamp(1, 32);
     let mut dsp = MicDspPipeline::new(initial_jitter)?;
+    let mut stream_paused = false;
 
     while running.load(Ordering::Relaxed) {
-        match inbound_mic_rx.blocking_recv() {
-            Some(pkt) => {
-                let cfg_snapshot = config.lock().clone();
-                dsp.ingest_packet(pkt, cfg_snapshot.jitter_buffer_packets.max(8));
+        let cfg_snapshot = config.lock().clone();
+        if !cfg_snapshot.phone_to_pc_enabled {
+            if !stream_paused {
+                let _ = stream.pause();
+                stream_paused = true;
+            }
+            telemetry.store_mic_levels(0.0, 0.0, 0.0);
+            dsp.reset();
+            {
+                let mut guard = output_ring.lock();
+                guard.ring.clear();
+                guard.primed = false;
+                guard.frac_pos = 0.0;
+            }
+            while inbound_mic_rx.try_recv().is_ok() {}
+            while render_ref_rx.try_recv().is_ok() {}
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            continue;
+        } else if stream_paused {
+            let _ = stream.play();
+            stream_paused = false;
+        }
+
+        match inbound_mic_rx.try_recv() {
+            Ok(pkt) => {
+                let jitter_depth = cfg_snapshot.jitter_buffer_packets.clamp(1, 32);
+                dsp.ingest_packet(pkt, jitter_depth);
                 // Drain any immediately queued packets before running DSP
                 while let Ok(more_pkt) = inbound_mic_rx.try_recv() {
-                    dsp.ingest_packet(more_pkt, cfg_snapshot.jitter_buffer_packets.max(8));
+                    dsp.ingest_packet(more_pkt, jitter_depth);
                 }
                 dsp.process_available(&cfg_snapshot, &telemetry, &output_ring, &render_ref_rx);
             }
-            None => break,
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                std::thread::sleep(std::time::Duration::from_millis(3));
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
         }
     }
 
@@ -1013,10 +1071,7 @@ fn fill_output_buffer_f32(
         return;
     }
     let out_frames = out.len() / out_channels;
-    let diag_t_enter = crate::diag::now_us(); // DIAG
     let mut guard = ring_state.lock();
-    let diag_t_locked = crate::diag::now_us(); // DIAG
-    let diag_ring_before = guard.ring.len(); // DIAG
 
     // 1. Initial pre-roll / recovery priming (ensures at least 150ms buffer before output starts)
     if !guard.primed {
@@ -1025,13 +1080,6 @@ fn fill_output_buffer_f32(
         } else {
             // Still priming: output silence
             out.fill(0.0);
-            crate::diag::on_output_callback(
-                diag_t_enter,
-                diag_t_locked,
-                out_frames,
-                out_rate,
-                diag_ring_before,
-            );
             return;
         }
     }
@@ -1089,14 +1137,6 @@ fn fill_output_buffer_f32(
             }
         }
     }
-
-    crate::diag::on_output_callback(
-        diag_t_enter,
-        diag_t_locked,
-        out_frames,
-        out_rate,
-        diag_ring_before,
-    ); // DIAG
 }
 
 #[cfg(test)]
@@ -1137,41 +1177,86 @@ mod tests {
 
     #[test]
     fn test_aec3_echo_suppression_pipeline() {
+        const TOTAL_FRAMES: usize = 80;
+        const CONVERGE_START: usize = 50;
+        const ECHO_DELAY_FRAMES: usize = 3;
+
         let mut dsp = MicDspPipeline::new(1).expect("DSP pipeline init");
         let (render_tx, render_rx) = std::sync::mpsc::sync_channel(16);
 
-        // Feed render frames (PC speaker playing 1000Hz tone)
-        for _ in 0..10 {
-            let mut render_frame = vec![0.0f32; FRAME_SAMPLES_10MS];
-            for i in 0..FRAME_SAMPLES_10MS {
-                let t = i as f32 / OPUS_SAMPLE_RATE as f32;
-                render_frame[i] = (2.0 * std::f32::consts::PI * 1000.0 * t).sin() * 0.4;
-            }
-            render_tx.send(render_frame).unwrap();
-        }
-
-        // Echo picked up by mic
-        let mut echo_pcm16 = Vec::with_capacity(FRAME_SAMPLES_10MS * 2);
-        for i in 0..FRAME_SAMPLES_10MS {
-            let t = i as f32 / OPUS_SAMPLE_RATE as f32;
-            let sample = (2.0 * std::f32::consts::PI * 1000.0 * t).sin() * 0.25;
-            let s16 = (sample * 32767.0) as i16;
-            echo_pcm16.extend_from_slice(&s16.to_le_bytes());
-        }
-
-        let pkt = FramedPacket::new(PacketType::AudioOpus, StreamId::PhoneToPc, 1, 100, echo_pcm16);
         let cfg = AudioConfig {
             aec_enabled: true,
             rnnoise_enabled: false,
+            vad_gate_threshold: 0.0,
+            jitter_buffer_packets: 1,
             ..Default::default()
         };
         let telemetry = AtomicAudioTelemetry::default();
         let output_ring = Mutex::new(OutputRingState::new());
 
-        dsp.ingest_packet(pkt, 1);
-        dsp.process_available(&cfg, &telemetry, &output_ring, &render_rx);
+        let mut rng_state: u64 = 0x1234_5678_9ABC_DEF0;
+        let mut delay_line: VecDeque<[f32; FRAME_SAMPLES_10MS]> =
+            VecDeque::from(vec![[0.0f32; FRAME_SAMPLES_10MS]; ECHO_DELAY_FRAMES]);
 
-        assert_eq!(output_ring.lock().ring.len(), FRAME_SAMPLES_10MS);
+        let mut input_energy_sq: f64 = 0.0;
+        let mut output_energy_sq: f64 = 0.0;
+        let mut measured_samples: usize = 0;
+
+        for frame_idx in 0..TOTAL_FRAMES {
+            // Deterministic broadband render excitation
+            let mut render_frame = [0.0f32; FRAME_SAMPLES_10MS];
+            for sample in &mut render_frame {
+                rng_state ^= rng_state << 13;
+                rng_state ^= rng_state >> 7;
+                rng_state ^= rng_state << 17;
+                let norm = ((rng_state & 0x7FFF_FFFF) as f32 / 0x4000_0000u32 as f32) - 1.0;
+                *sample = norm * 0.4;
+            }
+            delay_line.push_back(render_frame);
+            let delayed_render = delay_line.pop_front().unwrap();
+            render_tx.send(render_frame).unwrap();
+
+            // Capture receives attenuated delayed speaker echo (0.5x)
+            let mut echo_pcm16 = Vec::with_capacity(FRAME_SAMPLES_10MS * 2);
+            for &s in &delayed_render {
+                let echo_s = s * 0.5;
+                if frame_idx >= CONVERGE_START {
+                    input_energy_sq += (echo_s as f64) * (echo_s as f64);
+                }
+                let s16 = (echo_s.clamp(-1.0, 1.0) * 32767.0) as i16;
+                echo_pcm16.extend_from_slice(&s16.to_le_bytes());
+            }
+
+            let pkt = FramedPacket::new(
+                PacketType::AudioOpus,
+                StreamId::PhoneToPc,
+                (frame_idx + 1) as u16,
+                (frame_idx as u32) * 10_000,
+                echo_pcm16,
+            );
+
+            dsp.ingest_packet(pkt, 1);
+            dsp.process_available(&cfg, &telemetry, &output_ring, &render_rx);
+
+            let mut guard = output_ring.lock();
+            assert_eq!(guard.ring.len(), FRAME_SAMPLES_10MS);
+            if frame_idx >= CONVERGE_START {
+                while let Some(out_s) = guard.ring.pop_front() {
+                    output_energy_sq += (out_s as f64) * (out_s as f64);
+                    measured_samples += 1;
+                }
+            } else {
+                guard.ring.clear();
+            }
+        }
+
+        let input_rms = (input_energy_sq / measured_samples as f64).sqrt();
+        let output_rms = (output_energy_sq / measured_samples as f64).sqrt();
+        assert!(input_rms > 0.05, "expected non-trivial echo input RMS, got {input_rms}");
+        assert!(
+            output_rms < input_rms * 0.6,
+            "expected AEC3 echo attenuation (input_rms={input_rms:.4}, output_rms={output_rms:.4})"
+        );
     }
 
     #[test]

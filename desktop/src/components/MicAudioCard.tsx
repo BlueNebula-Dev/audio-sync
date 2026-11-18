@@ -73,33 +73,42 @@ const MicAudioCardComponent: React.FC<MicAudioCardProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
-          {/* Mute Button */}
+          {/* Mute Button (Silence only, keeps stream active) */}
           <button
             type="button"
             onClick={onToggleMute}
+            disabled={!config.phone_to_pc_enabled}
             className={`glass-pill px-3 py-1.5 flex items-center gap-2 text-xs font-medium transition-all ${
-              config.mic_muted
+              !config.phone_to_pc_enabled
+                ? 'opacity-40 text-slate-500 cursor-not-allowed'
+                : config.mic_muted
                 ? 'bg-rose-500/20 text-rose-300 border-rose-500/40 shadow-[0_0_15px_rgba(244,63,94,0.3)]'
                 : 'text-slate-300 hover:text-white'
             }`}
-            title="Toggle iPhone Mic Mute (Ctrl+Shift+M)"
+            title="Mute (Silence only — keeps mic stream active, Ctrl+Shift+M)"
           >
             {config.mic_muted ? <MicOffIcon size={16} /> : <MicIcon size={16} />}
-            <span>{config.mic_muted ? 'Muted' : 'Mute'}</span>
+            <span>{config.mic_muted ? 'Muted (Silence)' : 'Mute'}</span>
           </button>
 
-          {/* Enable Toggle Switch */}
-          <button
-            type="button"
-            onClick={() => onUpdateConfig({ ...config, phone_to_pc_enabled: !config.phone_to_pc_enabled })}
-            className={`w-12 h-6 rounded-pill p-1 transition-colors duration-200 ease-in-out border flex items-center ${
-              config.phone_to_pc_enabled
-                ? 'bg-violet-500 border-violet-400 justify-end shadow-[0_0_15px_rgba(168,85,247,0.4)]'
-                : 'bg-white/10 border-white/10 justify-start'
-            }`}
-          >
-            <div className="w-4 h-4 rounded-full bg-white shadow-md transition-transform" />
-          </button>
+          {/* Stream Power Toggle Switch (ON/OFF — stops iPhone mic capture & pauses VB-CABLE) */}
+          <div className="flex items-center gap-1.5" title="Stream Power ON/OFF: OFF stops iPhone mic capture & pauses VB-CABLE output">
+            <span className={`text-[10px] font-mono uppercase tracking-wider ${config.phone_to_pc_enabled ? 'text-violet-400' : 'text-slate-500'}`}>
+              {config.phone_to_pc_enabled ? 'PWR ON' : 'PWR OFF'}
+            </span>
+            <button
+              type="button"
+              onClick={() => onUpdateConfig({ ...config, phone_to_pc_enabled: !config.phone_to_pc_enabled })}
+              aria-label="Toggle iPhone Microphone Stream Power"
+              className={`w-12 h-6 rounded-pill p-1 transition-colors duration-200 ease-in-out border flex items-center ${
+                config.phone_to_pc_enabled
+                  ? 'bg-violet-500 border-violet-400 justify-end shadow-[0_0_15px_rgba(168,85,247,0.4)]'
+                  : 'bg-white/10 border-white/10 justify-start'
+              }`}
+            >
+              <div className="w-4 h-4 rounded-full bg-white shadow-md transition-transform" />
+            </button>
+          </div>
         </div>
       </div>
 
@@ -159,7 +168,13 @@ const MicAudioCardComponent: React.FC<MicAudioCardProps> = ({
       <div className="pt-1">
         <VuMeter
           label="Microphone Audio Level"
-          sublabel={isMicTransmitting ? 'Transmitting' : 'Silenced / PTT off'}
+          sublabel={
+            !config.phone_to_pc_enabled
+              ? 'Stream Powered Off (Paused)'
+              : isMicTransmitting
+              ? 'Transmitting'
+              : 'Silenced / PTT off'
+          }
           peak={levels.mic_peak}
           rms={levels.mic_rms}
           muted={!isMicTransmitting}

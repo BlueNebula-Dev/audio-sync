@@ -24,6 +24,9 @@ export interface AudioLevels {
   vad_probability: number;
 }
 
+export type TransportMode = 'auto' | 'wifi_udp' | 'usb_cable';
+export type ActiveTransport = 'none' | 'wifi_udp' | 'usb_cable';
+
 export interface NetworkStatus {
   local_ip: string;
   udp_port: number;
@@ -35,6 +38,10 @@ export interface NetworkStatus {
   packets_sent: number;
   packets_received: number;
   packets_lost: number;
+  transport_mode: TransportMode;
+  active_transport: ActiveTransport;
+  usbmux_available: boolean;
+  usb_device_name: string | null;
 }
 
 export interface AppSnapshot {

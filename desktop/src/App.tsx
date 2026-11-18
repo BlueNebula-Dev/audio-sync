@@ -5,7 +5,7 @@ import { ConnectionCard } from './components/ConnectionCard';
 import { PcAudioCard } from './components/PcAudioCard';
 import { MicAudioCard } from './components/MicAudioCard';
 import { SlidersIcon } from './components/Icons';
-import { AppSnapshot, AudioConfig } from './types';
+import { AppSnapshot, AudioConfig, AudioLevels, TransportMode } from './types';
 
 export const App: React.FC = () => {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
@@ -22,20 +22,40 @@ export const App: React.FC = () => {
       .catch((err) => console.error('Failed to get devices:', err));
   }, []);
 
-  // Subscribe to real-time 30fps telemetry events from Tauri backend
+  // Subscribe to split telemetry (`audio-levels` at 20Hz + on-change `app-state` + `config-updated`)
   useEffect(() => {
-    let unlistenFn: (() => void) | undefined;
+    let unlistenLevels: (() => void) | undefined;
+    let unlistenState: (() => void) | undefined;
+    let unlistenConfig: (() => void) | undefined;
 
-    listen<AppSnapshot>('audio-telemetry', (event) => {
+    listen<AudioLevels>('audio-levels', (event) => {
+      setSnapshot((prev) => (prev ? { ...prev, levels: event.payload } : null));
+    }).then((unlisten) => {
+      unlistenLevels = unlisten;
+    }).catch((err) => {
+      console.warn('Could not listen to audio-levels event:', err);
+    });
+
+    listen<AppSnapshot>('app-state', (event) => {
       setSnapshot(event.payload);
     }).then((unlisten) => {
-      unlistenFn = unlisten;
+      unlistenState = unlisten;
     }).catch((err) => {
-      console.warn('Could not listen to audio-telemetry event, fallback to poll:', err);
+      console.warn('Could not listen to app-state event:', err);
+    });
+
+    listen<AudioConfig>('config-updated', (event) => {
+      setSnapshot((prev) => (prev ? { ...prev, config: event.payload } : null));
+    }).then((unlisten) => {
+      unlistenConfig = unlisten;
+    }).catch((err) => {
+      console.warn('Could not listen to config-updated event:', err);
     });
 
     return () => {
-      if (unlistenFn) unlistenFn();
+      if (unlistenLevels) unlistenLevels();
+      if (unlistenState) unlistenState();
+      if (unlistenConfig) unlistenConfig();
     };
   }, []);
 
@@ -92,6 +112,15 @@ export const App: React.FC = () => {
       });
   }, []);
 
+  // Transport mode selector (Auto / Wi-Fi UDP / USB Cable)
+  const handleSetTransportMode = useCallback((mode: TransportMode) => {
+    setSnapshot((prev) =>
+      prev ? { ...prev, network: { ...prev.network, transport_mode: mode } } : null
+    );
+    invoke<TransportMode>('set_transport_mode', { mode })
+      .catch((err) => console.error('Failed to set transport mode:', err));
+  }, []);
+
   return (
     <div className="relative min-h-screen w-screen bg-canvas text-slate-100 flex flex-col p-6 overflow-x-hidden select-none">
       {/* 24px dot grid overlay */}
@@ -142,6 +171,7 @@ export const App: React.FC = () => {
             <ConnectionCard
               network={snapshot.network}
               onSetManualPeer={handleSetManualPeer}
+              onSetTransportMode={handleSetTransportMode}
             />
 
             {/* Bottom Row: Dual Audio Cards (PC Desktop Audio vs iPhone Mic) */}

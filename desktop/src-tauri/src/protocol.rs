@@ -8,6 +8,12 @@ pub const HEADER_SIZE: usize = 8;
 /// Maximum safe UDP datagram payload size (standard MTU 1500 - IP 20B - UDP 8B).
 pub const MAX_UDP_DATAGRAM_SIZE: usize = 1472;
 
+/// 2-byte big-endian length prefix size for TCP stream framing (`[u16 len][header][payload]`).
+pub const TCP_LENGTH_PREFIX_SIZE: usize = 2;
+
+/// Maximum TCP-framed packet size (supports 10ms/20ms uncompressed PCM16 or Opus + header).
+pub const MAX_TCP_FRAME_SIZE: usize = 8192;
+
 #[derive(Debug, Error)]
 pub enum ProtocolError {
     #[error("UDP packet too short: expected at least {HEADER_SIZE} bytes, got {0}")]
@@ -18,6 +24,8 @@ pub enum ProtocolError {
     UnknownStreamId(u8),
     #[error("Destination buffer too small: needed {needed} bytes, available {available}")]
     BufferTooSmall { needed: usize, available: usize },
+    #[error("Invalid TCP frame length: {0}")]
+    InvalidTcpFrameLength(usize),
     #[error("Control payload serialization error: {0}")]
     ControlPayloadError(String),
 }
@@ -233,6 +241,54 @@ impl FramedPacket {
         let payload = datagram[HEADER_SIZE..].to_vec();
         Ok(Self { header, payload })
     }
+
+    /// Encodes the packet with a 2-byte big-endian length prefix for TCP stream transport.
+    pub fn encode_tcp(&self) -> Vec<u8> {
+        let frame_len = HEADER_SIZE + self.payload.len();
+        let mut out = Vec::with_capacity(TCP_LENGTH_PREFIX_SIZE + frame_len);
+        out.extend_from_slice(&(frame_len as u16).to_be_bytes());
+        out.extend_from_slice(&self.header.to_bytes());
+        out.extend_from_slice(&self.payload);
+        out
+    }
+
+    /// Zero-allocation TCP length-prefixed encoding (`[u16 be length][8B header][payload]`).
+    pub fn encode_tcp_into(&self, dst: &mut [u8]) -> Result<usize, ProtocolError> {
+        let frame_len = HEADER_SIZE + self.payload.len();
+        if frame_len > MAX_TCP_FRAME_SIZE {
+            return Err(ProtocolError::InvalidTcpFrameLength(frame_len));
+        }
+        let total_len = TCP_LENGTH_PREFIX_SIZE + frame_len;
+        if dst.len() < total_len {
+            return Err(ProtocolError::BufferTooSmall {
+                needed: total_len,
+                available: dst.len(),
+            });
+        }
+        dst[..TCP_LENGTH_PREFIX_SIZE].copy_from_slice(&(frame_len as u16).to_be_bytes());
+        dst[TCP_LENGTH_PREFIX_SIZE..TCP_LENGTH_PREFIX_SIZE + HEADER_SIZE]
+            .copy_from_slice(&self.header.to_bytes());
+        dst[TCP_LENGTH_PREFIX_SIZE + HEADER_SIZE..total_len].copy_from_slice(&self.payload);
+        Ok(total_len)
+    }
+
+    /// Decodes the next 2-byte big-endian length-prefixed frame from a TCP stream buffer.
+    /// Returns `Ok(None)` if `buf` does not yet contain a complete frame.
+    pub fn decode_tcp_frame(buf: &[u8]) -> Result<Option<(Self, usize)>, ProtocolError> {
+        if buf.len() < TCP_LENGTH_PREFIX_SIZE {
+            return Ok(None);
+        }
+        let frame_len = u16::from_be_bytes([buf[0], buf[1]]) as usize;
+        if !(HEADER_SIZE..=MAX_TCP_FRAME_SIZE).contains(&frame_len) {
+            return Err(ProtocolError::InvalidTcpFrameLength(frame_len));
+        }
+        let total_len = TCP_LENGTH_PREFIX_SIZE + frame_len;
+        if buf.len() < total_len {
+            return Ok(None);
+        }
+        let pkt = Self::decode(&buf[TCP_LENGTH_PREFIX_SIZE..total_len])?;
+        Ok(Some((pkt, total_len)))
+    }
 }
 
 /// Control messages transmitted inside `PacketType::Control` payloads.
@@ -261,6 +317,23 @@ pub enum ControlMessage {
         jitter_capacity: usize,
         noise_suppression_enabled: bool,
         gain_db: f32,
+    },
+    SyncConfig {
+        revision: u64,
+        pc_to_phone_enabled: bool,
+        phone_to_pc_enabled: bool,
+        pc_muted: bool,
+        mic_muted: bool,
+        push_to_talk_enabled: bool,
+        push_to_talk_active: bool,
+        aec_enabled: bool,
+        rnnoise_enabled: bool,
+        vad_gate_threshold: f32,
+        mic_gain_db: f32,
+        pc_volume: f32,
+        opus_bitrate_bps: i32,
+        frame_duration_ms: u8,
+        jitter_buffer_packets: usize,
     },
     Disconnect {
         reason: String,
@@ -312,5 +385,113 @@ mod tests {
         assert_eq!(parsed.header.sequence_num, 65535);
         assert_eq!(parsed.header.timestamp, 12345678);
         assert_eq!(parsed.payload, opus_frame);
+    }
+
+    #[test]
+    fn test_sync_config_roundtrip() {
+        let msg = ControlMessage::SyncConfig {
+            revision: 42,
+            pc_to_phone_enabled: true,
+            phone_to_pc_enabled: false,
+            pc_muted: true,
+            mic_muted: false,
+            push_to_talk_enabled: true,
+            push_to_talk_active: false,
+            aec_enabled: true,
+            rnnoise_enabled: false,
+            vad_gate_threshold: 0.25,
+            mic_gain_db: 6.5,
+            pc_volume: 1.25,
+            opus_bitrate_bps: 96_000,
+            frame_duration_ms: 20,
+            jitter_buffer_packets: 6,
+        };
+
+        let pkt = FramedPacket::control(7, 987_654, &msg).expect("serialize sync_config");
+        let wire = pkt.encode();
+        let decoded_pkt = FramedPacket::decode(&wire).expect("decode framed packet");
+        assert_eq!(decoded_pkt.header.packet_type, PacketType::Control);
+        assert_eq!(decoded_pkt.header.stream_id, StreamId::Control);
+
+        let decoded_msg: ControlMessage =
+            serde_json::from_slice(&decoded_pkt.payload).expect("deserialize sync_config");
+        match decoded_msg {
+            ControlMessage::SyncConfig {
+                revision,
+                pc_to_phone_enabled,
+                phone_to_pc_enabled,
+                pc_muted,
+                mic_muted,
+                push_to_talk_enabled,
+                push_to_talk_active,
+                aec_enabled,
+                rnnoise_enabled,
+                vad_gate_threshold,
+                mic_gain_db,
+                pc_volume,
+                opus_bitrate_bps,
+                frame_duration_ms,
+                jitter_buffer_packets,
+            } => {
+                assert_eq!(revision, 42);
+                assert!(pc_to_phone_enabled);
+                assert!(!phone_to_pc_enabled);
+                assert!(pc_muted);
+                assert!(!mic_muted);
+                assert!(push_to_talk_enabled);
+                assert!(!push_to_talk_active);
+                assert!(aec_enabled);
+                assert!(!rnnoise_enabled);
+                assert!((vad_gate_threshold - 0.25).abs() < f32::EPSILON);
+                assert!((mic_gain_db - 6.5).abs() < f32::EPSILON);
+                assert!((pc_volume - 1.25).abs() < f32::EPSILON);
+                assert_eq!(opus_bitrate_bps, 96_000);
+                assert_eq!(frame_duration_ms, 20);
+                assert_eq!(jitter_buffer_packets, 6);
+            }
+            other => panic!("unexpected ControlMessage variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_tcp_length_prefixed_frame_roundtrip() {
+        let pkt1 = FramedPacket::new(
+            PacketType::AudioOpus,
+            StreamId::PhoneToPc,
+            101,
+            555_000,
+            vec![0x11, 0x22, 0x33, 0x44],
+        );
+        let pkt2 = FramedPacket::ping(7, 999_111);
+
+        // Single-frame encode_tcp / encode_tcp_into parity
+        let wire1 = pkt1.encode_tcp();
+        let mut scratch = [0u8; 64];
+        let written1 = pkt1.encode_tcp_into(&mut scratch).expect("encode_tcp_into");
+        assert_eq!(&scratch[..written1], wire1.as_slice());
+
+        // Partial reads return Ok(None) until complete frame arrives
+        assert_eq!(FramedPacket::decode_tcp_frame(&wire1[..1]).unwrap(), None);
+        assert_eq!(
+            FramedPacket::decode_tcp_frame(&wire1[..wire1.len() - 1]).unwrap(),
+            None
+        );
+
+        // Multi-frame concatenated stream decode
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&wire1);
+        stream.extend_from_slice(&pkt2.encode_tcp());
+
+        let (dec1, used1) = FramedPacket::decode_tcp_frame(&stream)
+            .expect("decode pkt1")
+            .expect("complete pkt1");
+        assert_eq!(dec1, pkt1);
+        assert_eq!(used1, wire1.len());
+
+        let (dec2, used2) = FramedPacket::decode_tcp_frame(&stream[used1..])
+            .expect("decode pkt2")
+            .expect("complete pkt2");
+        assert_eq!(dec2, pkt2);
+        assert_eq!(used1 + used2, stream.len());
     }
 }

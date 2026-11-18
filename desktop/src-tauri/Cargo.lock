@@ -134,6 +134,7 @@ dependencies = [
  "rusty-opus",
  "serde",
  "serde_json",
+ "smix-usbmux",
  "sonora",
  "tauri",
  "tauri-build",
@@ -3553,6 +3554,15 @@ name = "smallvec"
 version = "1.16.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "149309498a5f7334b12ddae0cad8aba81ce785fe91755068867e017cf98fee46"
+
+[[package]]
+name = "smix-usbmux"
+version = "25.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da07caaebac016cbc5191419dc4d63a15af47a6f0999de17bb49b019d8de0011"
+dependencies = [
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "socket2"

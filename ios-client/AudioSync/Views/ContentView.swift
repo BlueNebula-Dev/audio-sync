@@ -17,7 +17,7 @@ struct SystemAudioRoutePicker: UIViewRepresentable {
 
 // MARK: - 24-Segment Animated LED VU Meter View
 
-struct AnimatedVuMeterView: View {
+struct AnimatedVuMeterView: View, Equatable {
     let title: String
     let subtitle: String
     let peak: Float
@@ -25,6 +25,22 @@ struct AnimatedVuMeterView: View {
     let isMuted: Bool
     let accentColor: Color
     private let segmentCount: Int = 24
+
+    static func == (lhs: AnimatedVuMeterView, rhs: AnimatedVuMeterView) -> Bool {
+        let lhsPeakSeg = Int((min(lhs.effectivePeak, 1.0) * Float(lhs.segmentCount)).rounded())
+        let rhsPeakSeg = Int((min(rhs.effectivePeak, 1.0) * Float(rhs.segmentCount)).rounded())
+        let lhsRmsSeg = Int((lhs.effectiveRms * Float(lhs.segmentCount)).rounded())
+        let rhsRmsSeg = Int((rhs.effectiveRms * Float(rhs.segmentCount)).rounded())
+        let lhsQuantizedPeak = (lhs.effectivePeak * 100.0).rounded()
+        let rhsQuantizedPeak = (rhs.effectivePeak * 100.0).rounded()
+        return lhs.title == rhs.title
+            && lhs.subtitle == rhs.subtitle
+            && lhs.isMuted == rhs.isMuted
+            && lhs.accentColor == rhs.accentColor
+            && lhsPeakSeg == rhsPeakSeg
+            && lhsRmsSeg == rhsRmsSeg
+            && lhsQuantizedPeak == rhsQuantizedPeak
+    }
 
     private var effectivePeak: Float {
         isMuted ? 0.0 : min(max(peak, 0.0), 1.2)
@@ -124,18 +140,34 @@ struct ContentView: View {
             Color(red: 4 / 255, green: 5 / 255, blue: 8 / 255)
                 .ignoresSafeArea()
 
-            // Ambient lighting waves matching desktop Stitch Dark Glassmorphism
-            Circle()
-                .fill(Color(red: 168 / 255, green: 85 / 255, blue: 247 / 255).opacity(0.24))
-                .frame(width: 340, height: 340)
-                .blur(radius: 85)
-                .offset(x: -110, y: -270)
+            // GPU-friendly ambient lighting waves (radial gradients replace runtime Gaussian blurs)
+            RadialGradient(
+                colors: [
+                    Color(red: 168 / 255, green: 85 / 255, blue: 247 / 255).opacity(0.24),
+                    Color(red: 168 / 255, green: 85 / 255, blue: 247 / 255).opacity(0.08),
+                    Color.clear
+                ],
+                center: .center,
+                startRadius: 10,
+                endRadius: 240
+            )
+            .frame(width: 480, height: 480)
+            .offset(x: -110, y: -270)
+            .allowsHitTesting(false)
 
-            Circle()
-                .fill(Color(red: 34 / 255, green: 211 / 255, blue: 238 / 255).opacity(0.20))
-                .frame(width: 320, height: 320)
-                .blur(radius: 90)
-                .offset(x: 130, y: 200)
+            RadialGradient(
+                colors: [
+                    Color(red: 34 / 255, green: 211 / 255, blue: 238 / 255).opacity(0.20),
+                    Color(red: 34 / 255, green: 211 / 255, blue: 238 / 255).opacity(0.06),
+                    Color.clear
+                ],
+                center: .center,
+                startRadius: 10,
+                endRadius: 230
+            )
+            .frame(width: 460, height: 460)
+            .offset(x: 130, y: 200)
+            .allowsHitTesting(false)
 
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(spacing: 16) {
@@ -215,6 +247,8 @@ struct ContentView: View {
                     Text(networkClient.isConnected ? "CONNECTED" : "DISCOVERING PC")
                         .font(.system(size: 11, weight: .bold, design: .monospaced))
                         .foregroundColor(networkClient.isConnected ? .green : .orange)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
@@ -223,12 +257,30 @@ struct ContentView: View {
 
                 Spacer()
 
+                // Active Transport Badge (USB Cable vs Wi-Fi UDP)
+                let isUsbActive = networkClient.activeTransportLabel.contains("USB")
+                HStack(spacing: 4) {
+                    Image(systemName: isUsbActive ? "cable.connector" : "wifi")
+                        .font(.system(size: 10))
+                    Text(networkClient.activeTransportLabel)
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
+                .foregroundColor(isUsbActive ? .green : .purple)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background((isUsbActive ? Color.green : Color.purple).opacity(0.14))
+                .clipShape(Capsule())
+
                 // Real-time RTT Latency Pill
                 HStack(spacing: 5) {
                     Image(systemName: "waveform.path.ecg")
                         .font(.system(size: 11))
                     Text(String(format: "%.1f ms RTT", networkClient.rttMilliseconds))
                         .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                 }
                 .foregroundColor(.cyan)
                 .padding(.horizontal, 10)
@@ -242,7 +294,21 @@ struct ContentView: View {
                 .foregroundColor(Color.white.opacity(0.85))
                 .lineLimit(1)
 
-            // 4-Column Telemetry Grid: PC IP, UDP Port, Packets TX/RX, Packet Loss
+            // Segmented Transport Mode Picker (Auto / Wi-Fi / USB Cable)
+            VStack(alignment: .leading, spacing: 6) {
+                Picker("Transport", selection: $networkClient.transportMode) {
+                    ForEach(TransportMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                Text("USB Cable connects via Windows usbmuxd over TCP :\(kDefaultUsbTcpPort) (auto-switches when plugged in).")
+                    .font(.system(size: 10.5))
+                    .foregroundColor(Color.white.opacity(0.45))
+            }
+
+            // 4-Column Telemetry Grid: Endpoint, RTT, Packets TX/RX, Packet Loss
             LazyVGrid(
                 columns: [
                     GridItem(.flexible(), spacing: 8),
@@ -251,8 +317,8 @@ struct ContentView: View {
                 spacing: 8
             ) {
                 telemetryTile(
-                    label: "PC IP ADDRESS",
-                    value: "\(networkClient.manualHost):\(networkClient.manualPort)"
+                    label: "ACTIVE ENDPOINT",
+                    value: networkClient.activeEndpointDescription
                 )
                 telemetryTile(
                     label: "RTT LATENCY",
@@ -421,6 +487,7 @@ struct ContentView: View {
                 isMuted: audioManager.isSpeakerMuted || !audioManager.pcToPhoneEnabled,
                 accentColor: .cyan
             )
+            .equatable()
 
             // Outgoing iPhone Mic VU Meter
             AnimatedVuMeterView(
@@ -433,6 +500,7 @@ struct ContentView: View {
                     || (audioManager.pushToTalkEnabled && !audioManager.pushToTalkActive),
                 accentColor: .purple
             )
+            .equatable()
         }
         .padding(18)
         .background(glassBackground)
@@ -442,17 +510,23 @@ struct ContentView: View {
 
     private var transmissionAndMuteControlsCard: some View {
         VStack(alignment: .leading, spacing: 14) {
-            // Stream Direction Toggles
-            HStack(spacing: 12) {
-                Toggle("PC → iPhone", isOn: $audioManager.pcToPhoneEnabled)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.white)
-                    .tint(.cyan)
+            // Stream Power Toggles (Hardware ON/OFF — stops capture/playback & network transmission)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("STREAM POWER (HARDWARE ON / OFF)")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(Color.white.opacity(0.45))
 
-                Toggle("iPhone Mic → PC", isOn: $audioManager.phoneToPcEnabled)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.white)
-                    .tint(.purple)
+                HStack(spacing: 12) {
+                    Toggle("PC Audio Power", isOn: $audioManager.pcToPhoneEnabled)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.white)
+                        .tint(.cyan)
+
+                    Toggle("iPhone Mic Power", isOn: $audioManager.phoneToPcEnabled)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.white)
+                        .tint(.purple)
+                }
             }
 
             Divider().background(Color.white.opacity(0.1))
@@ -518,36 +592,54 @@ struct ContentView: View {
                     }
             )
 
-            // Dual Mute Buttons (Mic Mute & PC Audio Mute)
-            HStack(spacing: 10) {
-                Button(action: {
-                    audioManager.isMicMuted.toggle()
-                }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: audioManager.isMicMuted ? "mic.slash.fill" : "mic.fill")
-                        Text(audioManager.isMicMuted ? "Mic Muted" : "Mute Mic")
-                    }
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-                    .background(audioManager.isMicMuted ? Color.red.opacity(0.55) : Color.white.opacity(0.08))
-                    .clipShape(Capsule())
-                }
+            // Dual Mute Buttons (Silence Only — keeps audio stream alive)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("MUTE (SILENCE ONLY — KEEPS STREAM ACTIVE)")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(Color.white.opacity(0.45))
 
-                Button(action: {
-                    audioManager.isSpeakerMuted.toggle()
-                }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: audioManager.isSpeakerMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                        Text(audioManager.isSpeakerMuted ? "PC Muted" : "Mute PC Audio")
+                HStack(spacing: 10) {
+                    Button(action: {
+                        audioManager.isMicMuted.toggle()
+                    }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: audioManager.isMicMuted ? "mic.slash.fill" : "mic.fill")
+                            Text(audioManager.isMicMuted ? "Mic Muted" : "Mute Mic")
+                        }
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(
+                            !audioManager.phoneToPcEnabled
+                                ? Color.white.opacity(0.04)
+                                : (audioManager.isMicMuted ? Color.red.opacity(0.55) : Color.white.opacity(0.08))
+                        )
+                        .clipShape(Capsule())
                     }
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-                    .background(audioManager.isSpeakerMuted ? Color.red.opacity(0.55) : Color.white.opacity(0.08))
-                    .clipShape(Capsule())
+                    .disabled(!audioManager.phoneToPcEnabled)
+                    .opacity(audioManager.phoneToPcEnabled ? 1.0 : 0.45)
+
+                    Button(action: {
+                        audioManager.isSpeakerMuted.toggle()
+                    }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: audioManager.isSpeakerMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                            Text(audioManager.isSpeakerMuted ? "PC Muted" : "Mute PC Audio")
+                        }
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(
+                            !audioManager.pcToPhoneEnabled
+                                ? Color.white.opacity(0.04)
+                                : (audioManager.isSpeakerMuted ? Color.red.opacity(0.55) : Color.white.opacity(0.08))
+                        )
+                        .clipShape(Capsule())
+                    }
+                    .disabled(!audioManager.pcToPhoneEnabled)
+                    .opacity(audioManager.pcToPhoneEnabled ? 1.0 : 0.45)
                 }
             }
         }
@@ -611,7 +703,23 @@ struct ContentView: View {
                     .tint(.purple)
             }
 
-            // RNNoise AI Noise Suppression Toggle & Opus Bitrate Picker
+            // Acoustic Echo Cancellation (AEC3) Synced Toggle
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Acoustic Echo Cancellation (AEC3)")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(.white)
+                    Text("Cancels PC speaker bleed picked up by phone mic")
+                        .font(.system(size: 10))
+                        .foregroundColor(Color.white.opacity(0.5))
+                }
+                Spacer()
+                Toggle("", isOn: $audioManager.aecEnabledOnPc)
+                    .labelsHidden()
+                    .tint(.cyan)
+            }
+
+            // RNNoise AI Noise Suppression Toggle & VAD Gate Slider
             HStack {
                 Text("PC AI Noise Suppression (RNNoise)")
                     .font(.system(size: 13, weight: .medium))
@@ -620,6 +728,44 @@ struct ContentView: View {
                 Toggle("", isOn: $audioManager.rnnoiseEnabledOnPc)
                     .labelsHidden()
                     .tint(.purple)
+            }
+
+            if audioManager.rnnoiseEnabledOnPc {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Voice Gate Threshold (VAD)")
+                            .font(.system(size: 12))
+                            .foregroundColor(Color.white.opacity(0.75))
+                        Spacer()
+                        Text("\(Int((audioManager.vadGateThreshold * 100).rounded()))%")
+                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.purple)
+                    }
+                    Slider(value: $audioManager.vadGateThreshold, in: 0.0...0.8, step: 0.05)
+                        .tint(.purple)
+                }
+            }
+
+            // Adaptive Jitter Buffer Slider (Synced with PC)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Adaptive Jitter Buffer")
+                        .font(.system(size: 12))
+                        .foregroundColor(Color.white.opacity(0.75))
+                    Spacer()
+                    Text("\(audioManager.jitterBufferDepth * 10) ms (\(audioManager.jitterBufferDepth) frames)")
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .foregroundColor(.purple)
+                }
+                Slider(
+                    value: Binding<Double>(
+                        get: { Double(audioManager.jitterBufferDepth) },
+                        set: { audioManager.jitterBufferDepth = Int($0.rounded()) }
+                    ),
+                    in: 1.0...16.0,
+                    step: 1.0
+                )
+                .tint(.purple)
             }
 
             HStack {
@@ -635,6 +781,30 @@ struct ContentView: View {
                 }
                 .pickerStyle(.segmented)
                 .frame(width: 200)
+            }
+
+            Divider().background(Color.white.opacity(0.1))
+
+            // Advanced Settings: Optional iOS VoiceProcessingIO (.voiceChat)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("ADVANCED IOS AUDIO SESSION")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(Color.white.opacity(0.45))
+
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("iOS Call Beamforming (.voiceChat)")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.white)
+                        Text("Default OFF for clean 48 kHz wideband capture & playback")
+                            .font(.system(size: 10))
+                            .foregroundColor(Color.white.opacity(0.5))
+                    }
+                    Spacer()
+                    Toggle("", isOn: $audioManager.iosVoiceProcessingEnabled)
+                        .labelsHidden()
+                        .tint(.cyan)
+                }
             }
         }
         .padding(18)

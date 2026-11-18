@@ -45,33 +45,42 @@ const PcAudioCardComponent: React.FC<PcAudioCardProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
-          {/* Mute Button */}
+          {/* Mute Button (Silence only, keeps stream active) */}
           <button
             type="button"
             onClick={onToggleMute}
+            disabled={!config.pc_to_phone_enabled}
             className={`glass-pill px-3 py-1.5 flex items-center gap-2 text-xs font-medium transition-all ${
-              config.pc_muted
+              !config.pc_to_phone_enabled
+                ? 'opacity-40 text-slate-500 cursor-not-allowed'
+                : config.pc_muted
                 ? 'bg-rose-500/20 text-rose-300 border-rose-500/40 shadow-[0_0_15px_rgba(244,63,94,0.3)]'
                 : 'text-slate-300 hover:text-white'
             }`}
-            title="Toggle PC Output Mute"
+            title="Mute (Silence only — keeps WASAPI stream running)"
           >
             {config.pc_muted ? <VolumeXIcon size={16} /> : <Volume2Icon size={16} />}
-            <span>{config.pc_muted ? 'Muted' : 'Mute'}</span>
+            <span>{config.pc_muted ? 'Muted (Silence)' : 'Mute'}</span>
           </button>
 
-          {/* Enable Toggle Switch */}
-          <button
-            type="button"
-            onClick={() => onUpdateConfig({ ...config, pc_to_phone_enabled: !config.pc_to_phone_enabled })}
-            className={`w-12 h-6 rounded-pill p-1 transition-colors duration-200 ease-in-out border flex items-center ${
-              config.pc_to_phone_enabled
-                ? 'bg-cyan-500 border-cyan-400 justify-end shadow-[0_0_15px_rgba(34,211,238,0.4)]'
-                : 'bg-white/10 border-white/10 justify-start'
-            }`}
-          >
-            <div className="w-4 h-4 rounded-full bg-white shadow-md transition-transform" />
-          </button>
+          {/* Stream Power Toggle Switch (ON/OFF — pauses WASAPI loopback & stops transmission) */}
+          <div className="flex items-center gap-1.5" title="Stream Power ON/OFF: OFF pauses WASAPI loopback capture & stops sending audio">
+            <span className={`text-[10px] font-mono uppercase tracking-wider ${config.pc_to_phone_enabled ? 'text-cyan-400' : 'text-slate-500'}`}>
+              {config.pc_to_phone_enabled ? 'PWR ON' : 'PWR OFF'}
+            </span>
+            <button
+              type="button"
+              onClick={() => onUpdateConfig({ ...config, pc_to_phone_enabled: !config.pc_to_phone_enabled })}
+              aria-label="Toggle PC Audio Stream Power"
+              className={`w-12 h-6 rounded-pill p-1 transition-colors duration-200 ease-in-out border flex items-center ${
+                config.pc_to_phone_enabled
+                  ? 'bg-cyan-500 border-cyan-400 justify-end shadow-[0_0_15px_rgba(34,211,238,0.4)]'
+                  : 'bg-white/10 border-white/10 justify-start'
+              }`}
+            >
+              <div className="w-4 h-4 rounded-full bg-white shadow-md transition-transform" />
+            </button>
+          </div>
         </div>
       </div>
 
@@ -79,7 +88,7 @@ const PcAudioCardComponent: React.FC<PcAudioCardProps> = ({
       <div className="pt-1">
         <VuMeter
           label="PC Loopback Audio"
-          sublabel="48kHz Stereo WASAPI"
+          sublabel={config.pc_to_phone_enabled ? '48kHz Stereo WASAPI' : 'Stream Powered Off (Paused)'}
           peak={levels.pc_peak}
           rms={levels.pc_rms}
           muted={config.pc_muted || !config.pc_to_phone_enabled}

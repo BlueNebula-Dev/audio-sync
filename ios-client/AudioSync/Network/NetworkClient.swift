@@ -17,6 +17,8 @@ public let kMaxUdpDatagramSize: Int = 1472
 /// Default Windows PC IP address and UDP port.
 public let kDefaultPcHost: String = "192.168.1.13"
 public let kDefaultUdpPort: UInt16 = 54321
+public let kDefaultUsbTcpPort: UInt16 = 54322
+public let kMaxTcpFrameSize: Int = 8192
 
 /// mDNS / Bonjour service type broadcast by the Windows companion app (`_audiosync._udp.local.`).
 public let kMdnsServiceType: String = "_audiosync._udp"
@@ -199,6 +201,43 @@ public struct FramedPacket: Equatable, Sendable {
             : Data()
         return FramedPacket(header: header, payload: payload)
     }
+
+    /// Encodes a 2-byte big-endian length prefix followed by the 8-byte header + payload for TCP framing.
+    @inlinable
+    public func encodeTcpLengthPrefixed() -> Data {
+        let frameLen = kPacketHeaderSize + payload.count
+        guard frameLen <= kMaxTcpFrameSize else { return Data() }
+        var out = Data(capacity: 2 + frameLen)
+        out.append(UInt8((frameLen >> 8) & 0xFF))
+        out.append(UInt8(frameLen & 0xFF))
+        out.append(contentsOf: header.toBytes())
+        out.append(payload)
+        return out
+    }
+
+    /// Decodes the next 2-byte big-endian length-prefixed `FramedPacket` from a TCP stream buffer.
+    /// Returns `nil` when more bytes are needed. Clears invalid framing state if length exceeds protocol limits.
+    @inlinable
+    public static func decodeNextTcpFrame(from buffer: inout Data) -> FramedPacket? {
+        guard buffer.count >= 2 else { return nil }
+        let idx0 = buffer.startIndex
+        let idx1 = buffer.index(after: idx0)
+        let frameLen = (Int(buffer[idx0]) << 8) | Int(buffer[idx1])
+
+        guard frameLen >= kPacketHeaderSize && frameLen <= kMaxTcpFrameSize else {
+            buffer.removeAll(keepingCapacity: true)
+            return nil
+        }
+
+        let totalLen = 2 + frameLen
+        guard buffer.count >= totalLen else { return nil }
+
+        let frameStart = buffer.index(idx0, offsetBy: 2)
+        let frameEnd = buffer.index(frameStart, offsetBy: frameLen)
+        let packetSlice = buffer[frameStart..<frameEnd]
+        buffer.removeFirst(totalLen)
+        return FramedPacket.decode(Data(packetSlice))
+    }
 }
 
 /// Returns signed 16-bit wrapping sequence difference `a - b`, identical to Rust `sequence_diff`.
@@ -209,11 +248,64 @@ public func sequenceDiff(_ a: UInt16, _ b: UInt16) -> Int16 {
 
 // MARK: - Control Signaling Messages (Matches Rust `#[serde(tag = "type", rename_all = "snake_case")]`)
 
+public struct SyncConfigPayload: Equatable, Sendable {
+    public let revision: UInt64
+    public let pcToPhoneEnabled: Bool
+    public let phoneToPcEnabled: Bool
+    public let pcMuted: Bool
+    public let micMuted: Bool
+    public let pushToTalkEnabled: Bool
+    public let pushToTalkActive: Bool
+    public let aecEnabled: Bool
+    public let rnnoiseEnabled: Bool
+    public let vadGateThreshold: Float
+    public let micGainDb: Float
+    public let pcVolume: Float
+    public let opusBitrateBps: Int32
+    public let frameDurationMs: UInt8
+    public let jitterBufferPackets: Int
+
+    public init(
+        revision: UInt64,
+        pcToPhoneEnabled: Bool,
+        phoneToPcEnabled: Bool,
+        pcMuted: Bool,
+        micMuted: Bool,
+        pushToTalkEnabled: Bool,
+        pushToTalkActive: Bool,
+        aecEnabled: Bool,
+        rnnoiseEnabled: Bool,
+        vadGateThreshold: Float,
+        micGainDb: Float,
+        pcVolume: Float,
+        opusBitrateBps: Int32,
+        frameDurationMs: UInt8,
+        jitterBufferPackets: Int
+    ) {
+        self.revision = revision
+        self.pcToPhoneEnabled = pcToPhoneEnabled
+        self.phoneToPcEnabled = phoneToPcEnabled
+        self.pcMuted = pcMuted
+        self.micMuted = micMuted
+        self.pushToTalkEnabled = pushToTalkEnabled
+        self.pushToTalkActive = pushToTalkActive
+        self.aecEnabled = aecEnabled
+        self.rnnoiseEnabled = rnnoiseEnabled
+        self.vadGateThreshold = vadGateThreshold
+        self.micGainDb = micGainDb
+        self.pcVolume = pcVolume
+        self.opusBitrateBps = opusBitrateBps
+        self.frameDurationMs = frameDurationMs
+        self.jitterBufferPackets = jitterBufferPackets
+    }
+}
+
 public enum ControlMessage: Sendable {
     case handshake(deviceName: String, protocolVersion: UInt8, sampleRate: UInt32, channels: UInt8)
     case handshakeAck(serverName: String, pcToPhoneEnabled: Bool, phoneToPcEnabled: Bool, opusBitrate: Int32)
     case muteState(streamId: StreamId, muted: Bool)
     case streamConfig(opusBitrate: Int32, frameDurationMs: UInt8, jitterCapacity: Int, noiseSuppressionEnabled: Bool, gainDb: Float)
+    case syncConfig(SyncConfigPayload)
     case disconnect(reason: String)
 
     public func toJSONData() -> Data? {
@@ -249,6 +341,25 @@ public enum ControlMessage: Sendable {
                 "jitter_capacity": jitterCapacity,
                 "noise_suppression_enabled": noiseSuppressionEnabled,
                 "gain_db": gainDb
+            ]
+        case let .syncConfig(cfg):
+            dict = [
+                "type": "sync_config",
+                "revision": cfg.revision,
+                "pc_to_phone_enabled": cfg.pcToPhoneEnabled,
+                "phone_to_pc_enabled": cfg.phoneToPcEnabled,
+                "pc_muted": cfg.pcMuted,
+                "mic_muted": cfg.micMuted,
+                "push_to_talk_enabled": cfg.pushToTalkEnabled,
+                "push_to_talk_active": cfg.pushToTalkActive,
+                "aec_enabled": cfg.aecEnabled,
+                "rnnoise_enabled": cfg.rnnoiseEnabled,
+                "vad_gate_threshold": cfg.vadGateThreshold,
+                "mic_gain_db": cfg.micGainDb,
+                "pc_volume": cfg.pcVolume,
+                "opus_bitrate_bps": cfg.opusBitrateBps,
+                "frame_duration_ms": cfg.frameDurationMs,
+                "jitter_buffer_packets": cfg.jitterBufferPackets
             ]
         case let .disconnect(reason):
             dict = [
@@ -290,7 +401,7 @@ public enum ControlMessage: Sendable {
         case "stream_config":
             let bitrate = (obj["opus_bitrate"] as? NSNumber)?.int32Value ?? 64_000
             let frameMs = (obj["frame_duration_ms"] as? NSNumber)?.uint8Value ?? 10
-            let jitter = (obj["jitter_capacity"] as? NSNumber)?.intValue ?? 2
+            let jitter = (obj["jitter_capacity"] as? NSNumber)?.intValue ?? 8
             let rnnoise = (obj["noise_suppression_enabled"] as? Bool) ?? true
             let gain = (obj["gain_db"] as? NSNumber)?.floatValue ?? 0.0
             return .streamConfig(
@@ -299,6 +410,41 @@ public enum ControlMessage: Sendable {
                 jitterCapacity: jitter,
                 noiseSuppressionEnabled: rnnoise,
                 gainDb: gain
+            )
+        case "sync_config":
+            let revision = (obj["revision"] as? NSNumber)?.uint64Value ?? 0
+            let pcToPhone = (obj["pc_to_phone_enabled"] as? Bool) ?? true
+            let phoneToPc = (obj["phone_to_pc_enabled"] as? Bool) ?? true
+            let pcMuted = (obj["pc_muted"] as? Bool) ?? false
+            let micMuted = (obj["mic_muted"] as? Bool) ?? false
+            let pttEnabled = (obj["push_to_talk_enabled"] as? Bool) ?? false
+            let pttActive = (obj["push_to_talk_active"] as? Bool) ?? false
+            let aecEnabled = (obj["aec_enabled"] as? Bool) ?? true
+            let rnnoiseEnabled = (obj["rnnoise_enabled"] as? Bool) ?? true
+            let vadGate = (obj["vad_gate_threshold"] as? NSNumber)?.floatValue ?? 0.15
+            let micGain = (obj["mic_gain_db"] as? NSNumber)?.floatValue ?? 0.0
+            let pcVol = (obj["pc_volume"] as? NSNumber)?.floatValue ?? 1.0
+            let bitrate = (obj["opus_bitrate_bps"] as? NSNumber)?.int32Value ?? 64_000
+            let frameMs = (obj["frame_duration_ms"] as? NSNumber)?.uint8Value ?? 10
+            let jitter = (obj["jitter_buffer_packets"] as? NSNumber)?.intValue ?? 8
+            return .syncConfig(
+                SyncConfigPayload(
+                    revision: revision,
+                    pcToPhoneEnabled: pcToPhone,
+                    phoneToPcEnabled: phoneToPc,
+                    pcMuted: pcMuted,
+                    micMuted: micMuted,
+                    pushToTalkEnabled: pttEnabled,
+                    pushToTalkActive: pttActive,
+                    aecEnabled: aecEnabled,
+                    rnnoiseEnabled: rnnoiseEnabled,
+                    vadGateThreshold: vadGate,
+                    micGainDb: micGain,
+                    pcVolume: pcVol,
+                    opusBitrateBps: bitrate,
+                    frameDurationMs: frameMs,
+                    jitterBufferPackets: jitter
+                )
             )
         case "disconnect":
             let reason = (obj["reason"] as? String) ?? "Server closed connection"
@@ -319,7 +465,17 @@ public struct DiscoveredHost: Identifiable, Equatable, Sendable {
     public let sampleRate: Int
 }
 
-// MARK: - NetworkClient (NWBrowser + NWConnection + Background/Foreground Recovery)
+// MARK: - Transport Selection Mode
+
+public enum TransportMode: String, CaseIterable, Identifiable, Sendable {
+    case auto = "Auto"
+    case wifi = "Wi-Fi"
+    case usb = "USB Cable"
+
+    public var id: String { rawValue }
+}
+
+// MARK: - NetworkClient (NWBrowser + NWConnection + USB Listener + Recovery)
 
 public final class NetworkClient: ObservableObject {
     // Published UI telemetry (updated on MainQueue)
@@ -328,10 +484,21 @@ public final class NetworkClient: ObservableObject {
     @Published public private(set) var discoveredHosts: [DiscoveredHost] = []
     @Published public private(set) var connectedServerName: String = "Not Connected"
     @Published public private(set) var activeEndpointDescription: String = "\(kDefaultPcHost):\(kDefaultUdpPort)"
+    @Published public private(set) var activeTransportLabel: String = "Wi-Fi UDP"
     @Published public private(set) var rttMilliseconds: Double = 0.0
     @Published public private(set) var packetsSent: UInt64 = 0
     @Published public private(set) var packetsReceived: UInt64 = 0
     @Published public private(set) var packetsLost: UInt64 = 0
+
+    // Transport preference (Auto prefers wired USB-to-Lightning TCP :54322 when plugged in)
+    @Published public var transportMode: TransportMode = .auto {
+        didSet {
+            let mode = transportMode
+            netQueue.async { [weak self] in
+                self?.applyTransportModeOnQueue(mode)
+            }
+        }
+    }
 
     // Editable manual IP / Port fallback (defaults to 192.168.1.13:54321 per specification)
     @Published public var manualHost: String = kDefaultPcHost
@@ -347,12 +514,19 @@ public final class NetworkClient: ObservableObject {
     private let netQueue = DispatchQueue(label: "com.audiosync.ios.network", qos: .userInteractive)
     private var browser: NWBrowser?
     private var connection: NWConnection?
+    private var usbListener: NWListener?
+    private var usbConnection: NWConnection?
+    private var isUsbConnectionReady: Bool = false
+    private var usbReceiveBuffer = Data()
+    private var currentTransportMode: TransportMode = .auto
+    private var isStopped: Bool = false
     private var pathMonitor: NWPathMonitor?
     private var keepaliveTimer: DispatchSourceTimer?
     private var outboundMicQueue: [Data] = []
     private var micPacingTimer: DispatchSourceTimer?
 
     private var currentTargetEndpoint: NWEndpoint?
+    private var udpEndpointDescription: String = "\(kDefaultPcHost):\(kDefaultUdpPort)"
     private var isUserInitiatedDisconnect: Bool = false
     @usableFromInline internal let startTimeNanoseconds: UInt64 = DispatchTime.now().uptimeNanoseconds
 
@@ -370,6 +544,7 @@ public final class NetworkClient: ObservableObject {
     public init() {
         setupPathMonitor()
         setupLifecycleObservers()
+        startUsbListener()
     }
 
     deinit {
@@ -449,6 +624,8 @@ public final class NetworkClient: ObservableObject {
                 // Auto-connect to the first discovered AudioSync PC if not already connected
                 if !self.isConnected,
                    !self.isUserInitiatedDisconnect,
+                   !self.isUsbConnectionReady,
+                   self.currentTransportMode != .usb,
                    let firstHost = hosts.first {
                     self.connectToEndpointOnQueue(firstHost.endpoint, displayName: firstHost.name)
                 }
@@ -500,6 +677,7 @@ public final class NetworkClient: ObservableObject {
             self.reconnectWorkItem?.cancel()
             self.sendControlOnQueue(.disconnect(reason: "User disconnected"))
             self.teardownConnectionOnQueue()
+            self.teardownUsbConnectionOnQueue()
             DispatchQueue.main.async {
                 self.isConnected = false
                 self.connectionStateText = "Disconnected"
@@ -510,18 +688,247 @@ public final class NetworkClient: ObservableObject {
     public func stopAll() {
         netQueue.async { [weak self] in
             guard let self = self else { return }
+            self.isStopped = true
             self.reconnectWorkItem?.cancel()
             self.stopBrowserOnQueue()
             self.teardownConnectionOnQueue()
+            self.teardownUsbConnectionOnQueue()
+            self.stopUsbListenerOnQueue()
             self.pathMonitor?.cancel()
         }
     }
 
+    /// Starts the TCP listener on port 54322 (`kDefaultUsbTcpPort`) for Apple `usbmuxd` wired USB tunnels.
+    public func startUsbListener() {
+        netQueue.async { [weak self] in
+            self?.startUsbListenerOnQueue()
+        }
+    }
+
+    private func applyTransportModeOnQueue(_ mode: TransportMode) {
+        currentTransportMode = mode
+        switch mode {
+        case .wifi:
+            teardownUsbConnectionOnQueue()
+            let udpLabel = udpEndpointDescription
+            DispatchQueue.main.async {
+                self.activeTransportLabel = "Wi-Fi UDP"
+                self.activeEndpointDescription = udpLabel
+            }
+            if connection == nil && !isUserInitiatedDisconnect {
+                scheduleReconnectOnQueue(delay: 0.1)
+            } else if connection != nil {
+                sendHandshakeOnQueue()
+                sendPingOnQueue()
+            }
+
+        case .auto:
+            startUsbListenerOnQueue()
+            if isUsbConnectionReady {
+                DispatchQueue.main.async {
+                    self.activeTransportLabel = "USB Cable"
+                    self.activeEndpointDescription = "USB Mux :\(kDefaultUsbTcpPort)"
+                }
+                sendHandshakeOnQueue()
+                sendPingOnQueue()
+            } else {
+                let udpLabel = udpEndpointDescription
+                DispatchQueue.main.async {
+                    self.activeTransportLabel = "Wi-Fi UDP"
+                    self.activeEndpointDescription = udpLabel
+                }
+                if connection == nil && !isUserInitiatedDisconnect {
+                    scheduleReconnectOnQueue(delay: 0.1)
+                }
+            }
+
+        case .usb:
+            startUsbListenerOnQueue()
+            reconnectWorkItem?.cancel()
+            teardownConnectionOnQueue()
+            if isUsbConnectionReady {
+                DispatchQueue.main.async {
+                    self.activeTransportLabel = "USB Cable"
+                    self.activeEndpointDescription = "USB Mux :\(kDefaultUsbTcpPort)"
+                    self.connectionStateText = "USB tunnel ready (:\(kDefaultUsbTcpPort))"
+                }
+                sendHandshakeOnQueue()
+                sendPingOnQueue()
+            } else {
+                DispatchQueue.main.async {
+                    self.isConnected = false
+                    self.activeTransportLabel = "USB Cable"
+                    self.activeEndpointDescription = "USB Mux :\(kDefaultUsbTcpPort)"
+                    self.connectionStateText = "Waiting for USB tunnel (:\(kDefaultUsbTcpPort))..."
+                }
+            }
+        }
+    }
+
+    private func startUsbListenerOnQueue() {
+        guard !isStopped, usbListener == nil else { return }
+        guard let usbPort = NWEndpoint.Port(rawValue: kDefaultUsbTcpPort) else { return }
+
+        let tcpOptions = NWProtocolTCP.Options()
+        tcpOptions.noDelay = true
+        let params = NWParameters(tls: nil, tcp: tcpOptions)
+        params.allowLocalEndpointReuse = true
+        params.serviceClass = .interactiveVoice
+
+        do {
+            let listener = try NWListener(using: params, on: usbPort)
+            listener.stateUpdateHandler = { [weak self] state in
+                guard let self = self else { return }
+                switch state {
+                case .failed(let error):
+                    self.stopUsbListenerOnQueue()
+                    if self.currentTransportMode == .usb {
+                        self.publishStatus("USB listener failed (\(error.localizedDescription)) — retrying...")
+                    }
+                    self.netQueue.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                        self?.startUsbListenerOnQueue()
+                    }
+                default:
+                    break
+                }
+            }
+            listener.newConnectionHandler = { [weak self] newConn in
+                self?.acceptUsbConnectionOnQueue(newConn)
+            }
+            listener.start(queue: netQueue)
+            self.usbListener = listener
+        } catch {
+            if currentTransportMode == .usb {
+                publishStatus("Unable to bind USB listener (:\(kDefaultUsbTcpPort)): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func stopUsbListenerOnQueue() {
+        if let listener = usbListener {
+            usbListener = nil
+            listener.stateUpdateHandler = nil
+            listener.newConnectionHandler = nil
+            listener.cancel()
+        }
+    }
+
+    private func acceptUsbConnectionOnQueue(_ newConn: NWConnection) {
+        guard !isStopped, !isUserInitiatedDisconnect, currentTransportMode != .wifi else {
+            newConn.cancel()
+            return
+        }
+
+        teardownUsbConnectionOnQueue()
+        usbConnection = newConn
+        isUsbConnectionReady = false
+        usbReceiveBuffer.removeAll(keepingCapacity: true)
+
+        newConn.stateUpdateHandler = { [weak self] state in
+            guard let self = self, self.usbConnection === newConn else { return }
+            switch state {
+            case .ready:
+                self.isUsbConnectionReady = true
+                self.lastInboundPcSeq = nil
+                self.lastPacketReceivedAt = .now()
+                DispatchQueue.main.async {
+                    self.activeTransportLabel = "USB Cable"
+                    self.activeEndpointDescription = "USB Mux :\(kDefaultUsbTcpPort)"
+                    self.connectionStateText = "USB tunnel ready (:\(kDefaultUsbTcpPort))..."
+                }
+                self.startUsbReceiveLoopOnQueue(for: newConn)
+                self.startKeepaliveTimerOnQueue()
+                self.sendHandshakeOnQueue()
+                self.sendPingOnQueue()
+
+            case .failed(let error):
+                self.handleUsbDisconnectOnQueue(reason: "USB tunnel failed (\(error.localizedDescription))")
+
+            case .cancelled:
+                self.handleUsbDisconnectOnQueue(reason: "USB tunnel closed")
+
+            default:
+                break
+            }
+        }
+
+        newConn.start(queue: netQueue)
+    }
+
+    private func startUsbReceiveLoopOnQueue(for conn: NWConnection) {
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] content, _, isComplete, error in
+            guard let self = self, self.usbConnection === conn else { return }
+
+            if let data = content, !data.isEmpty {
+                self.usbReceiveBuffer.append(data)
+                while let packet = FramedPacket.decodeNextTcpFrame(from: &self.usbReceiveBuffer) {
+                    self.handleInboundPacketOnQueue(packet, viaUsb: true)
+                }
+            }
+
+            if let error = error {
+                if case .posix(let code) = error, code == .ECANCELED {
+                    return
+                }
+                self.handleUsbDisconnectOnQueue(reason: "USB read error (\(error.localizedDescription))")
+                return
+            }
+
+            if isComplete {
+                self.handleUsbDisconnectOnQueue(reason: "USB peer disconnected")
+                return
+            }
+
+            self.startUsbReceiveLoopOnQueue(for: conn)
+        }
+    }
+
+    private func handleUsbDisconnectOnQueue(reason: String) {
+        teardownUsbConnectionOnQueue()
+        let fallbackUdpAlive = (connection != nil) && (currentTransportMode != .usb)
+        let udpLabel = udpEndpointDescription
+        DispatchQueue.main.async {
+            if fallbackUdpAlive {
+                self.activeTransportLabel = "Wi-Fi UDP"
+                self.activeEndpointDescription = udpLabel
+                self.connectionStateText = "USB disconnected — using Wi-Fi UDP"
+            } else {
+                self.isConnected = false
+                self.activeTransportLabel = self.currentTransportMode == .usb ? "USB Cable" : "Wi-Fi UDP"
+                self.connectionStateText = self.currentTransportMode == .usb
+                    ? "Waiting for USB tunnel (:\(kDefaultUsbTcpPort))..."
+                    : reason
+            }
+        }
+        if !fallbackUdpAlive && currentTransportMode != .usb && !isUserInitiatedDisconnect {
+            scheduleReconnectOnQueue(delay: 0.5)
+        }
+    }
+
+    private func teardownUsbConnectionOnQueue() {
+        isUsbConnectionReady = false
+        usbReceiveBuffer.removeAll(keepingCapacity: true)
+        if connection == nil {
+            micPacingTimer?.cancel()
+            micPacingTimer = nil
+            outboundMicQueue.removeAll(keepingCapacity: true)
+            keepaliveTimer?.cancel()
+            keepaliveTimer = nil
+        }
+        if let usbConn = usbConnection {
+            usbConnection = nil
+            usbConn.stateUpdateHandler = nil
+            usbConn.cancel()
+        }
+    }
+
     private func connectToEndpointOnQueue(_ endpoint: NWEndpoint, displayName: String) {
+        guard currentTransportMode != .usb else { return }
         reconnectWorkItem?.cancel()
         teardownConnectionOnQueue()
 
         currentTargetEndpoint = endpoint
+        udpEndpointDescription = displayName
 
         let udpOptions = NWProtocolUDP.Options()
         let params = NWParameters(dtls: nil, udp: udpOptions)
@@ -533,9 +940,12 @@ public final class NetworkClient: ObservableObject {
         let conn = NWConnection(to: endpoint, using: params)
         self.connection = conn
 
-        DispatchQueue.main.async {
-            self.activeEndpointDescription = displayName
-            self.connectionStateText = "Connecting to \(displayName)..."
+        if !isUsbConnectionReady {
+            DispatchQueue.main.async {
+                self.activeTransportLabel = "Wi-Fi UDP"
+                self.activeEndpointDescription = displayName
+                self.connectionStateText = "Connecting to \(displayName)..."
+            }
         }
 
         conn.stateUpdateHandler = { [weak self] state in
@@ -543,8 +953,11 @@ public final class NetworkClient: ObservableObject {
             switch state {
             case .ready:
                 self.lastInboundPcSeq = nil
-                DispatchQueue.main.async {
-                    self.connectionStateText = "Socket ready, reaching \(displayName)..."
+                if !self.isUsbConnectionReady {
+                    DispatchQueue.main.async {
+                        self.activeTransportLabel = "Wi-Fi UDP"
+                        self.connectionStateText = "Socket ready, reaching \(displayName)..."
+                    }
                 }
                 self.startReceiveLoopOnQueue(for: conn)
                 self.startKeepaliveTimerOnQueue()
@@ -552,19 +965,25 @@ public final class NetworkClient: ObservableObject {
                 self.sendPingOnQueue()
 
             case .waiting(let error):
-                self.publishStatus("Waiting for network (\(error.localizedDescription))...")
+                if !self.isUsbConnectionReady {
+                    self.publishStatus("Waiting for network (\(error.localizedDescription))...")
+                }
                 self.scheduleReconnectOnQueue(delay: 1.5)
 
             case .failed(let error):
-                self.publishStatus("Socket failed (\(error.localizedDescription)) — recovering...")
-                DispatchQueue.main.async {
-                    self.isConnected = false
+                if !self.isUsbConnectionReady {
+                    self.publishStatus("Socket failed (\(error.localizedDescription)) — recovering...")
+                    DispatchQueue.main.async {
+                        self.isConnected = false
+                    }
                 }
                 self.scheduleReconnectOnQueue(delay: 1.0)
 
             case .cancelled:
-                DispatchQueue.main.async {
-                    self.isConnected = false
+                if !self.isUsbConnectionReady {
+                    DispatchQueue.main.async {
+                        self.isConnected = false
+                    }
                 }
 
             default:
@@ -576,11 +995,13 @@ public final class NetworkClient: ObservableObject {
     }
 
     private func teardownConnectionOnQueue() {
-        micPacingTimer?.cancel()
-        micPacingTimer = nil
-        outboundMicQueue.removeAll(keepingCapacity: true)
-        keepaliveTimer?.cancel()
-        keepaliveTimer = nil
+        if !isUsbConnectionReady {
+            micPacingTimer?.cancel()
+            micPacingTimer = nil
+            outboundMicQueue.removeAll(keepingCapacity: true)
+            keepaliveTimer?.cancel()
+            keepaliveTimer = nil
+        }
         if let conn = connection {
             conn.stateUpdateHandler = nil
             conn.cancel()
@@ -596,16 +1017,17 @@ public final class NetworkClient: ObservableObject {
     }
 
     private func scheduleReconnectOnQueue(delay: TimeInterval) {
-        guard autoReconnectEnabled, !isUserInitiatedDisconnect else { return }
+        guard autoReconnectEnabled, !isUserInitiatedDisconnect, currentTransportMode != .usb else { return }
         reconnectWorkItem?.cancel()
 
         let item = DispatchWorkItem { [weak self] in
             guard let self = self,
                   self.autoReconnectEnabled,
-                  !self.isUserInitiatedDisconnect else { return }
+                  !self.isUserInitiatedDisconnect,
+                  self.currentTransportMode != .usb else { return }
 
             if let target = self.currentTargetEndpoint {
-                self.connectToEndpointOnQueue(target, displayName: self.activeEndpointDescription)
+                self.connectToEndpointOnQueue(target, displayName: self.udpEndpointDescription)
             } else {
                 // Fallback to manual IP (192.168.1.13:54321) while mDNS continues browsing
                 let portVal = UInt16(self.manualPort) ?? kDefaultUdpPort
@@ -623,11 +1045,11 @@ public final class NetworkClient: ObservableObject {
 
     private func startReceiveLoopOnQueue(for conn: NWConnection) {
         conn.receiveMessage { [weak self] content, _, _, error in
-            guard let self = self else { return }
+            guard let self = self, self.connection === conn else { return }
 
             if let data = content, data.count >= kPacketHeaderSize,
                let packet = FramedPacket.decode(data) {
-                self.handleInboundPacketOnQueue(packet)
+                self.handleInboundPacketOnQueue(packet, viaUsb: false)
             }
 
             if let error = error {
@@ -645,7 +1067,14 @@ public final class NetworkClient: ObservableObject {
         }
     }
 
-    private func handleInboundPacketOnQueue(_ packet: FramedPacket) {
+    private func handleInboundPacketOnQueue(_ packet: FramedPacket, viaUsb: Bool = false) {
+        if !viaUsb && (currentTransportMode == .usb || (currentTransportMode == .auto && isUsbConnectionReady)) {
+            return
+        }
+        if viaUsb && currentTransportMode == .wifi {
+            return
+        }
+
         lastPacketReceivedAt = .now()
         internalPacketsReceived &+= 1
         if !isConnected {
@@ -712,6 +1141,16 @@ public final class NetworkClient: ObservableObject {
         }
     }
 
+    /// Cancels the pacing timer and clears any queued outbound microphone frames immediately.
+    public func flushOutboundMicQueue() {
+        netQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.micPacingTimer?.cancel()
+            self.micPacingTimer = nil
+            self.outboundMicQueue.removeAll(keepingCapacity: true)
+        }
+    }
+
     private func ensureMicPacingTimerRunningOnQueue() {
         guard micPacingTimer == nil else { return }
         let timer = DispatchSource.makeTimerSource(queue: netQueue)
@@ -725,7 +1164,6 @@ public final class NetworkClient: ObservableObject {
                 return
             }
             let opusData = self.outboundMicQueue.removeFirst()
-            MicDiag.shared.onMicSend(payloadBytes: opusData.count) // DIAG
             let seq = self.outboundMicSeq
             self.outboundMicSeq &+= 1
             let ts = self.currentTimestampMicros()
@@ -786,14 +1224,25 @@ public final class NetworkClient: ObservableObject {
     }
 
     private func sendRawFramedPacketOnQueue(_ packet: FramedPacket) {
-        guard let conn = connection else {
-            MicDiag.shared.onSendNoConnection() // DIAG
+        if currentTransportMode != .wifi,
+           isUsbConnectionReady,
+           let usbConn = usbConnection {
+            let wireData = packet.encodeTcpLengthPrefixed()
+            guard !wireData.isEmpty else { return }
+            usbConn.send(content: wireData, completion: .contentProcessed { [weak self] error in
+                guard let self = self else { return }
+                if error == nil {
+                    self.internalPacketsSent &+= 1
+                }
+            })
+            return
+        }
+
+        guard currentTransportMode != .usb, let conn = connection else {
             return
         }
         let wireData = packet.encode()
-        MicDiag.shared.onSendIssued() // DIAG
         conn.send(content: wireData, completion: .contentProcessed { [weak self] error in
-            MicDiag.shared.onSendCompleted(error: error) // DIAG
             guard let self = self else { return }
             if error == nil {
                 self.internalPacketsSent &+= 1
@@ -835,7 +1284,11 @@ public final class NetworkClient: ObservableObject {
                 // Re-send handshake and trigger socket recovery if peer stopped responding
                 self.sendHandshakeOnQueue()
                 if elapsedSinceRecv > 8.0 {
-                    self.scheduleReconnectOnQueue(delay: 0.5)
+                    if self.isUsbConnectionReady {
+                        self.handleUsbDisconnectOnQueue(reason: "USB keepalive timeout")
+                    } else {
+                        self.scheduleReconnectOnQueue(delay: 0.5)
+                    }
                 }
             }
         }
@@ -849,10 +1302,10 @@ public final class NetworkClient: ObservableObject {
             guard let self = self else { return }
             if path.status == .satisfied {
                 self.startDiscovery()
-                if !self.isUserInitiatedDisconnect && !self.isConnected {
+                if !self.isUserInitiatedDisconnect && !self.isConnected && !self.isUsbConnectionReady {
                     self.scheduleReconnectOnQueue(delay: 0.5)
                 }
-            } else {
+            } else if !self.isUsbConnectionReady && self.currentTransportMode != .usb {
                 self.publishStatus("Waiting for Wi-Fi connection...")
             }
         }

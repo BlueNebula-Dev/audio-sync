@@ -1,13 +1,24 @@
 import React, { useState } from 'react';
 import { WifiIcon, ActivityIcon, CheckIcon } from './Icons';
-import { NetworkStatus } from '../types';
+import { NetworkStatus, TransportMode } from '../types';
 
 interface ConnectionCardProps {
   network: NetworkStatus;
   onSetManualPeer: (ipAndPort: string) => void;
+  onSetTransportMode: (mode: TransportMode) => void;
 }
 
-const ConnectionCardComponent: React.FC<ConnectionCardProps> = ({ network, onSetManualPeer }) => {
+const TRANSPORT_OPTIONS: { mode: TransportMode; label: string }[] = [
+  { mode: 'auto', label: 'Auto (USB Pref)' },
+  { mode: 'wifi_udp', label: 'Wi-Fi UDP' },
+  { mode: 'usb_cable', label: 'USB Cable' },
+];
+
+const ConnectionCardComponent: React.FC<ConnectionCardProps> = ({
+  network,
+  onSetManualPeer,
+  onSetTransportMode,
+}) => {
   const [manualIp, setManualIp] = useState('');
   const [showManualInput, setShowManualInput] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -72,20 +83,73 @@ const ConnectionCardComponent: React.FC<ConnectionCardProps> = ({ network, onSet
           </div>
         </div>
 
-        {/* Latency RTT Badge */}
-        {network.connected && (
-          <div className="flex items-center gap-3 bg-white/5 px-3 py-1.5 rounded-pill border border-white/10 font-mono text-xs">
-            <div className="flex items-center gap-1.5 text-cyan-400">
-              <ActivityIcon size={14} />
-              <span>{network.rtt_ms.toFixed(1)} ms</span>
-            </div>
-            <span className="text-slate-500">|</span>
-            <span className="text-slate-300 text-[11px]">
-              {network.peer_device_name || 'iPhone 13'}
-            </span>
+        {/* Transport & Latency RTT Badge */}
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Segmented Transport Selector */}
+          <div className="flex items-center gap-1 bg-white/[0.04] p-1 rounded-pill border border-white/10">
+            {TRANSPORT_OPTIONS.map((opt) => {
+              const selected = network.transport_mode === opt.mode;
+              return (
+                <button
+                  key={opt.mode}
+                  type="button"
+                  onClick={() => onSetTransportMode(opt.mode)}
+                  className={`px-2.5 py-1 rounded-pill text-[11px] font-medium transition-all ${
+                    selected
+                      ? 'bg-cyan-500 text-slate-950 font-semibold shadow-sm'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              );
+            })}
           </div>
-        )}
+
+          {network.connected && (
+            <div className="flex items-center gap-3 bg-white/5 px-3 py-1.5 rounded-pill border border-white/10 font-mono text-xs">
+              <span
+                className={`text-[11px] font-semibold ${
+                  network.active_transport === 'usb_cable' ? 'text-emerald-400' : 'text-cyan-400'
+                }`}
+              >
+                {network.active_transport === 'usb_cable' ? 'USB Wired' : 'Wi-Fi UDP'}
+              </span>
+              <span className="text-slate-500">•</span>
+              <div className="flex items-center gap-1.5 text-cyan-400">
+                <ActivityIcon size={14} />
+                <span>{network.rtt_ms.toFixed(1)} ms</span>
+              </div>
+              <span className="text-slate-500">|</span>
+              <span className="text-slate-300 text-[11px]">
+                {network.peer_device_name || network.usb_device_name || 'iPhone 13'}
+              </span>
+            </div>
+          )}
+        </div>
       </div>
+
+      {/* USB Driver / Device Status Banner */}
+      {(network.transport_mode === 'usb_cable' || network.usb_device_name) && (
+        <div
+          className={`flex items-center justify-between px-3 py-2 rounded-2xl border text-xs ${
+            network.usbmux_available
+              ? network.usb_device_name
+                ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                : 'bg-white/[0.03] border-white/10 text-slate-300'
+              : 'bg-amber-500/10 border-amber-500/30 text-amber-300'
+          }`}
+        >
+          <span>
+            {!network.usbmux_available
+              ? 'Apple Mobile Device Service (usbmuxd 127.0.0.1:27015) not detected — install Apple Devices or iTunes for Windows to enable Lightning USB audio.'
+              : network.usb_device_name
+              ? `USB Lightning Detected: ${network.usb_device_name}`
+              : 'usbmuxd ready — connect iPhone via Lightning-to-USB cable and open AudioSync iOS.'}
+          </span>
+          <span className="font-mono text-[10px] opacity-75 ml-2 shrink-0">TCP :54322</span>
+        </div>
+      )}
 
       {/* Network Stats Grid */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 font-mono text-xs pt-1">
