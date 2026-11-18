@@ -363,6 +363,7 @@ public final class AudioEngineManager: ObservableObject {
     @Published public var pcToPhoneEnabled: Bool = true {
         didSet {
             guard oldValue != pcToPhoneEnabled else { return }
+            UserDefaults.standard.set(pcToPhoneEnabled, forKey: "audiosync_pc_to_phone_enabled")
             applyPcToPhonePowerState(enabled: pcToPhoneEnabled)
             if !isApplyingRemoteSync { pushSyncConfigToPc() }
         }
@@ -370,6 +371,7 @@ public final class AudioEngineManager: ObservableObject {
     @Published public var phoneToPcEnabled: Bool = true {
         didSet {
             guard oldValue != phoneToPcEnabled else { return }
+            UserDefaults.standard.set(phoneToPcEnabled, forKey: "audiosync_phone_to_pc_enabled")
             applyPhoneToPcPowerState(enabled: phoneToPcEnabled)
             if !isApplyingRemoteSync { pushSyncConfigToPc() }
         }
@@ -377,6 +379,7 @@ public final class AudioEngineManager: ObservableObject {
     @Published public var isMicMuted: Bool = false {
         didSet {
             guard oldValue != isMicMuted else { return }
+            UserDefaults.standard.set(isMicMuted, forKey: "audiosync_mic_muted")
             if isMicMuted {
                 micPeakLevel = 0.0
                 micRmsLevel = 0.0
@@ -387,6 +390,7 @@ public final class AudioEngineManager: ObservableObject {
     @Published public var isSpeakerMuted: Bool = false {
         didSet {
             guard oldValue != isSpeakerMuted else { return }
+            UserDefaults.standard.set(isSpeakerMuted, forKey: "audiosync_speaker_muted")
             if isSpeakerMuted {
                 pcPeakLevel = 0.0
                 pcRmsLevel = 0.0
@@ -397,6 +401,7 @@ public final class AudioEngineManager: ObservableObject {
     @Published public var pushToTalkEnabled: Bool = false {
         didSet {
             guard oldValue != pushToTalkEnabled else { return }
+            UserDefaults.standard.set(pushToTalkEnabled, forKey: "audiosync_push_to_talk_enabled")
             if !isApplyingRemoteSync { pushSyncConfigToPc() }
         }
     }
@@ -410,18 +415,21 @@ public final class AudioEngineManager: ObservableObject {
     @Published public var micGainDb: Float = 0.0 {
         didSet {
             guard oldValue != micGainDb else { return }
+            UserDefaults.standard.set(micGainDb, forKey: "audiosync_mic_gain_db")
             if !isApplyingRemoteSync { pushSyncConfigToPc() }
         }
     }
     @Published public var speakerVolume: Float = 1.0 {
         didSet {
             guard oldValue != speakerVolume else { return }
+            UserDefaults.standard.set(speakerVolume, forKey: "audiosync_speaker_volume")
             if !isApplyingRemoteSync { pushSyncConfigToPc() }
         }
     }
     @Published public var opusBitrateBps: Int32 = 64_000 {
         didSet {
             guard oldValue != opusBitrateBps else { return }
+            UserDefaults.standard.set(opusBitrateBps, forKey: "audiosync_opus_bitrate_bps")
             micEncoder?.bitrateBps = opusBitrateBps
             if !isApplyingRemoteSync { pushSyncConfigToPc() }
         }
@@ -429,12 +437,14 @@ public final class AudioEngineManager: ObservableObject {
     @Published public var frameDurationMs: Int = 10 {
         didSet {
             guard oldValue != frameDurationMs else { return }
+            UserDefaults.standard.set(frameDurationMs, forKey: "audiosync_frame_duration_ms")
             if !isApplyingRemoteSync { pushSyncConfigToPc() }
         }
     }
     @Published public var jitterBufferDepth: Int = 8 {
         didSet {
             guard oldValue != jitterBufferDepth else { return }
+            UserDefaults.standard.set(jitterBufferDepth, forKey: "audiosync_jitter_buffer_depth")
             let depth = jitterBufferDepth
             audioQueue.async { [weak self] in
                 guard let self = self else { return }
@@ -446,24 +456,28 @@ public final class AudioEngineManager: ObservableObject {
     @Published public var aecEnabledOnPc: Bool = true {
         didSet {
             guard oldValue != aecEnabledOnPc else { return }
+            UserDefaults.standard.set(aecEnabledOnPc, forKey: "audiosync_aec_enabled")
             if !isApplyingRemoteSync { pushSyncConfigToPc() }
         }
     }
     @Published public var rnnoiseEnabledOnPc: Bool = true {
         didSet {
             guard oldValue != rnnoiseEnabledOnPc else { return }
+            UserDefaults.standard.set(rnnoiseEnabledOnPc, forKey: "audiosync_rnnoise_enabled")
             if !isApplyingRemoteSync { pushSyncConfigToPc() }
         }
     }
     @Published public var vadGateThreshold: Float = 0.15 {
         didSet {
             guard oldValue != vadGateThreshold else { return }
+            UserDefaults.standard.set(vadGateThreshold, forKey: "audiosync_vad_gate_threshold")
             if !isApplyingRemoteSync { pushSyncConfigToPc() }
         }
     }
     @Published public var iosVoiceProcessingEnabled: Bool = false {
         didSet {
             guard oldValue != iosVoiceProcessingEnabled else { return }
+            UserDefaults.standard.set(iosVoiceProcessingEnabled, forKey: "audiosync_ios_voice_processing_enabled")
             let enabled = iosVoiceProcessingEnabled
             audioQueue.async { [weak self] in
                 guard let self = self, self.engineActiveOnQueue else { return }
@@ -478,6 +492,7 @@ public final class AudioEngineManager: ObservableObject {
     }
     @Published public var selectedOutputRoute: AudioOutputRoute = .speaker {
         didSet {
+            UserDefaults.standard.set(selectedOutputRoute.rawValue, forKey: "audiosync_output_route")
             useSpeakerphoneOutput = (selectedOutputRoute == .speaker)
             audioQueue.async { [weak self] in
                 self?.updateAudioOutputRoute()
@@ -534,16 +549,70 @@ public final class AudioEngineManager: ObservableObject {
 
     public init(networkClient: NetworkClient? = nil) {
         self.networkClient = networkClient
+
+        // Restore persisted user settings from UserDefaults
+        if UserDefaults.standard.object(forKey: "audiosync_pc_to_phone_enabled") != nil {
+            self.pcToPhoneEnabled = UserDefaults.standard.bool(forKey: "audiosync_pc_to_phone_enabled")
+        }
+        if UserDefaults.standard.object(forKey: "audiosync_phone_to_pc_enabled") != nil {
+            self.phoneToPcEnabled = UserDefaults.standard.bool(forKey: "audiosync_phone_to_pc_enabled")
+        }
+        if UserDefaults.standard.object(forKey: "audiosync_mic_muted") != nil {
+            self.isMicMuted = UserDefaults.standard.bool(forKey: "audiosync_mic_muted")
+        }
+        if UserDefaults.standard.object(forKey: "audiosync_speaker_muted") != nil {
+            self.isSpeakerMuted = UserDefaults.standard.bool(forKey: "audiosync_speaker_muted")
+        }
+        if UserDefaults.standard.object(forKey: "audiosync_push_to_talk_enabled") != nil {
+            self.pushToTalkEnabled = UserDefaults.standard.bool(forKey: "audiosync_push_to_talk_enabled")
+        }
+        if UserDefaults.standard.object(forKey: "audiosync_mic_gain_db") != nil {
+            self.micGainDb = UserDefaults.standard.float(forKey: "audiosync_mic_gain_db")
+        }
+        if UserDefaults.standard.object(forKey: "audiosync_speaker_volume") != nil {
+            self.speakerVolume = UserDefaults.standard.float(forKey: "audiosync_speaker_volume")
+        }
+        if UserDefaults.standard.object(forKey: "audiosync_opus_bitrate_bps") != nil {
+            let bitrate = UserDefaults.standard.integer(forKey: "audiosync_opus_bitrate_bps")
+            if bitrate > 0 { self.opusBitrateBps = Int32(bitrate) }
+        }
+        if UserDefaults.standard.object(forKey: "audiosync_frame_duration_ms") != nil {
+            let frameMs = UserDefaults.standard.integer(forKey: "audiosync_frame_duration_ms")
+            if frameMs > 0 { self.frameDurationMs = frameMs }
+        }
+        if UserDefaults.standard.object(forKey: "audiosync_jitter_buffer_depth") != nil {
+            let depth = UserDefaults.standard.integer(forKey: "audiosync_jitter_buffer_depth")
+            if depth > 0 { self.jitterBufferDepth = depth }
+        }
+        if UserDefaults.standard.object(forKey: "audiosync_aec_enabled") != nil {
+            self.aecEnabledOnPc = UserDefaults.standard.bool(forKey: "audiosync_aec_enabled")
+        }
+        if UserDefaults.standard.object(forKey: "audiosync_rnnoise_enabled") != nil {
+            self.rnnoiseEnabledOnPc = UserDefaults.standard.bool(forKey: "audiosync_rnnoise_enabled")
+        }
+        if UserDefaults.standard.object(forKey: "audiosync_vad_gate_threshold") != nil {
+            self.vadGateThreshold = UserDefaults.standard.float(forKey: "audiosync_vad_gate_threshold")
+        }
+        if UserDefaults.standard.object(forKey: "audiosync_ios_voice_processing_enabled") != nil {
+            self.iosVoiceProcessingEnabled = UserDefaults.standard.bool(forKey: "audiosync_ios_voice_processing_enabled")
+        }
+        if let savedRoute = UserDefaults.standard.string(forKey: "audiosync_output_route"),
+           let route = AudioOutputRoute(rawValue: savedRoute) {
+            self.selectedOutputRoute = route
+            self.useSpeakerphoneOutput = (route == .speaker)
+        }
+
         self.micEncoder = try? SwiftOpusEncoder(
             sampleRate: kOpusSampleRateInt,
             channels: 1,
-            bitrateBps: 64_000
+            bitrateBps: self.opusBitrateBps
         )
         self.pcDecoder = try? SwiftOpusDecoder(
             sampleRate: kOpusSampleRateInt,
             channels: 2
         )
         self.micSampleFifo.reserveCapacity(kFrameSamples20ms * 8)
+        self.pcJitterBuffer.targetDepth = self.jitterBufferDepth
 
         bindNetworkCallbacks()
         setupAudioSessionNotifications()

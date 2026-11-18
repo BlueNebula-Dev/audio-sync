@@ -493,6 +493,7 @@ public final class NetworkClient: ObservableObject {
     // Transport preference (Auto prefers wired USB-to-Lightning TCP :54322 when plugged in)
     @Published public var transportMode: TransportMode = .auto {
         didSet {
+            UserDefaults.standard.set(transportMode.rawValue, forKey: "audiosync_transport_mode")
             let mode = transportMode
             netQueue.async { [weak self] in
                 self?.applyTransportModeOnQueue(mode)
@@ -501,9 +502,21 @@ public final class NetworkClient: ObservableObject {
     }
 
     // Editable manual IP / Port fallback (defaults to 192.168.1.13:54321 per specification)
-    @Published public var manualHost: String = kDefaultPcHost
-    @Published public var manualPort: String = String(kDefaultUdpPort)
-    @Published public var autoReconnectEnabled: Bool = true
+    @Published public var manualHost: String = kDefaultPcHost {
+        didSet {
+            UserDefaults.standard.set(manualHost, forKey: "audiosync_manual_host")
+        }
+    }
+    @Published public var manualPort: String = String(kDefaultUdpPort) {
+        didSet {
+            UserDefaults.standard.set(manualPort, forKey: "audiosync_manual_port")
+        }
+    }
+    @Published public var autoReconnectEnabled: Bool = true {
+        didSet {
+            UserDefaults.standard.set(autoReconnectEnabled, forKey: "audiosync_auto_reconnect")
+        }
+    }
 
     /// Callback invoked on the high-priority network queue whenever a `PcToPhone` (`0x01`) Opus packet arrives.
     public var onInboundPcAudioPacket: ((FramedPacket) -> Void)?
@@ -542,6 +555,21 @@ public final class NetworkClient: ObservableObject {
     private var reconnectWorkItem: DispatchWorkItem?
 
     public init() {
+        if let savedMode = UserDefaults.standard.string(forKey: "audiosync_transport_mode"),
+           let parsed = TransportMode(rawValue: savedMode) {
+            self.transportMode = parsed
+            self.currentTransportMode = parsed
+        }
+        if let savedHost = UserDefaults.standard.string(forKey: "audiosync_manual_host"), !savedHost.isEmpty {
+            self.manualHost = savedHost
+        }
+        if let savedPort = UserDefaults.standard.string(forKey: "audiosync_manual_port"), !savedPort.isEmpty {
+            self.manualPort = savedPort
+        }
+        if UserDefaults.standard.object(forKey: "audiosync_auto_reconnect") != nil {
+            self.autoReconnectEnabled = UserDefaults.standard.bool(forKey: "audiosync_auto_reconnect")
+        }
+
         setupPathMonitor()
         setupLifecycleObservers()
         startUsbListener()
@@ -1128,42 +1156,11 @@ public final class NetworkClient: ObservableObject {
 
     // MARK: - Outbound Audio & Control Transmission
 
-    /// Enqueues an encoded 48kHz mono Opus microphone frame and paces transmission at a steady 10ms interval.
+    /// Immediately transmits an encoded 48kHz mono Opus microphone frame.
+    /// Direct transmission aligns frame release 1:1 with hardware capture and avoids software timer pacing drift.
     public func sendMicrophoneOpusFrame(_ opusData: Data) {
         netQueue.async { [weak self] in
             guard let self = self else { return }
-            self.outboundMicQueue.append(opusData)
-            // Limit queue depth to 20 frames (200ms) to prevent latency runaway if network stalls
-            if self.outboundMicQueue.count > 20 {
-                self.outboundMicQueue.removeFirst(self.outboundMicQueue.count - 20)
-            }
-            self.ensureMicPacingTimerRunningOnQueue()
-        }
-    }
-
-    /// Cancels the pacing timer and clears any queued outbound microphone frames immediately.
-    public func flushOutboundMicQueue() {
-        netQueue.async { [weak self] in
-            guard let self = self else { return }
-            self.micPacingTimer?.cancel()
-            self.micPacingTimer = nil
-            self.outboundMicQueue.removeAll(keepingCapacity: true)
-        }
-    }
-
-    private func ensureMicPacingTimerRunningOnQueue() {
-        guard micPacingTimer == nil else { return }
-        let timer = DispatchSource.makeTimerSource(queue: netQueue)
-        // Fire every 10ms (100 packets/sec) with 1ms leeway
-        timer.schedule(deadline: .now(), repeating: .milliseconds(10), leeway: .milliseconds(1))
-        timer.setEventHandler { [weak self] in
-            guard let self = self else { return }
-            guard !self.outboundMicQueue.isEmpty else {
-                self.micPacingTimer?.cancel()
-                self.micPacingTimer = nil
-                return
-            }
-            let opusData = self.outboundMicQueue.removeFirst()
             let seq = self.outboundMicSeq
             self.outboundMicSeq &+= 1
             let ts = self.currentTimestampMicros()
@@ -1177,8 +1174,16 @@ public final class NetworkClient: ObservableObject {
             )
             self.sendRawFramedPacketOnQueue(pkt)
         }
-        timer.resume()
-        micPacingTimer = timer
+    }
+
+    /// Clears any queued state (retained for protocol/lifecycle parity).
+    public func flushOutboundMicQueue() {
+        netQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.micPacingTimer?.cancel()
+            self.micPacingTimer = nil
+            self.outboundMicQueue.removeAll(keepingCapacity: true)
+        }
     }
 
     /// Sends a control message (e.g. MuteState or StreamConfig) to the Windows PC.
