@@ -7,32 +7,28 @@ export default {
   theme: {
     extend: {
       colors: {
-        canvas: '#040508',
-        glass: {
-          surface: 'rgba(23, 27, 43, 0.65)',
-          border: 'rgba(255, 255, 255, 0.12)',
-        },
+        canvas: '#F4F4F5',
+        card: '#FFFFFF',
+        border: '#E4E4E7',
         brand: {
-          cyan: '#22d3ee',
-          violet: '#a855f7',
-          blurple: '#6366f1',
-          emerald: '#10b981',
-          rose: '#f43f5e',
-          amber: '#f59e0b',
+          dark: '#18181B',
+          muted: '#71717A',
+          subtle: '#A1A1AA',
+          green: '#16A34A',
+          amber: '#92400E',
+          red: '#DC2626',
+          blue: '#2563EB',
         }
       },
       borderRadius: {
-        'card': '28px',
-        'menu': '20px',
+        'card': '20px',
+        'menu': '16px',
         'pill': '9999px',
       },
-      transitionTimingFunction: {
-        'spring': 'cubic-bezier(0.16, 1, 0.3, 1)',
-      },
       boxShadow: {
-        'glass-bevel': 'inset 0 1px 1px rgba(255, 255, 255, 0.18)',
-        'glass-glow-cyan': '0 0 35px -8px rgba(34, 211, 238, 0.28)',
-        'glass-glow-violet': '0 0 35px -8px rgba(168, 85, 247, 0.28)',
+        'card': '0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 1px 2px -1px rgba(0, 0, 0, 0.05)',
+        'card-hover': '0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.05)',
+        'modal': '0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1)',
       }
     },
   },

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { WifiIcon, ActivityIcon, CheckIcon } from './Icons';
+import { WifiIcon, ActivityIcon, CheckIcon, XIcon, SmartphoneIcon, CableIcon } from './Icons';
 import { NetworkStatus, TransportMode } from '../types';
 
 interface ConnectionCardProps {
@@ -9,9 +9,9 @@ interface ConnectionCardProps {
 }
 
 const TRANSPORT_OPTIONS: { mode: TransportMode; label: string }[] = [
-  { mode: 'auto', label: 'Auto (USB Pref)' },
-  { mode: 'wifi_udp', label: 'Wi-Fi UDP' },
-  { mode: 'usb_cable', label: 'USB Cable' },
+  { mode: 'auto', label: 'Auto' },
+  { mode: 'wifi_udp', label: 'Wi-Fi' },
+  { mode: 'usb_cable', label: 'USB' },
 ];
 
 const ConnectionCardComponent: React.FC<ConnectionCardProps> = ({
@@ -20,17 +20,16 @@ const ConnectionCardComponent: React.FC<ConnectionCardProps> = ({
   onSetTransportMode,
 }) => {
   const [manualIp, setManualIp] = useState('');
-  const [showManualInput, setShowManualInput] = useState(false);
+  const [showManualModal, setShowManualModal] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const handleManualSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!manualIp.trim()) return;
     try {
-      // Validate IP or IP:Port
       const formatted = manualIp.includes(':') ? manualIp.trim() : `${manualIp.trim()}:${network.udp_port || 54321}`;
       onSetManualPeer(formatted);
-      setShowManualInput(false);
+      setShowManualModal(false);
       setErrorMsg(null);
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
@@ -38,55 +37,46 @@ const ConnectionCardComponent: React.FC<ConnectionCardProps> = ({
   };
 
   return (
-    <div className="glass-panel p-6 flex flex-col gap-4 relative overflow-hidden group">
-      {/* Subtle top indicator line */}
-      <div
-        className={`absolute top-0 left-0 right-0 h-1 transition-all duration-300 ${
-          network.connected
-            ? 'bg-gradient-to-r from-emerald-400 via-cyan-400 to-blurple'
-            : 'bg-gradient-to-r from-amber-500/40 via-violet-500/20 to-transparent'
-        }`}
-      />
-
-      <div className="flex items-center justify-between">
+    <>
+      {/* Single-Row Focused Utility Bar matching Figma node 15:4 */}
+      <div className="clean-panel px-5 py-3 flex items-center justify-between">
+        {/* Left: App Logo + Title + Version */}
         <div className="flex items-center gap-3">
-          <div
-            className={`w-10 h-10 rounded-pill flex items-center justify-center transition-all duration-300 ${
-              network.connected
-                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-[0_0_20px_rgba(16,185,129,0.3)]'
-                : 'bg-white/5 text-slate-400 border border-white/10'
-            }`}
-          >
-            <WifiIcon size={20} />
+          <div className="w-8 h-8 rounded-xl bg-brand-dark text-white flex items-center justify-center shadow-sm">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 2v20M17 5v14M7 8v8M22 10v4M2 10v4" />
+            </svg>
           </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <h2 className="text-sm font-semibold tracking-wide text-slate-100">Local Wi-Fi Network</h2>
-              <span
-                className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-pill text-[11px] font-medium tracking-wide uppercase ${
-                  network.connected
-                    ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
-                    : 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
-                }`}
-              >
-                <span
-                  className={`w-1.5 h-1.5 rounded-full ${
-                    network.connected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
-                  }`}
-                />
-                {network.connected ? 'Connected' : 'Waiting for iPhone'}
-              </span>
-            </div>
-            <p className="text-xs text-slate-400 mt-0.5">
-              mDNS: <span className="font-mono text-cyan-400">{network.mdns_active ? 'Active (_audiosync._udp)' : 'Inactive'}</span>
-            </p>
+          <div className="flex items-baseline gap-2">
+            <span className="font-bold text-[15px] text-brand-dark tracking-tight">AudioSync</span>
+            <span className="text-xs text-brand-muted font-normal">v1.0</span>
           </div>
         </div>
 
-        {/* Transport & Latency RTT Badge */}
-        <div className="flex flex-wrap items-center gap-2">
-          {/* Segmented Transport Selector */}
-          <div className="flex items-center gap-1 bg-white/[0.04] p-1 rounded-pill border border-white/10">
+        {/* Center: Live Status Pill */}
+        <div className="flex items-center">
+          {network.connected ? (
+            <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-800 text-[11.5px] font-semibold">
+              <span className="w-2 h-2 rounded-full bg-emerald-600 animate-pulse" />
+              <span>
+                Connected {network.peer_device_name ? `· ${network.peer_device_name}` : ''}
+              </span>
+              <span className="text-emerald-700 font-mono text-[11px] font-normal">
+                ({network.rtt_ms.toFixed(1)} ms)
+              </span>
+            </div>
+          ) : (
+            <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-amber-50 border border-amber-200 text-amber-800 text-[11.5px] font-semibold">
+              <span className="w-2 h-2 rounded-full bg-amber-600" />
+              <span>Waiting for iPhone</span>
+            </div>
+          )}
+        </div>
+
+        {/* Right: Segmented Transport Controls & Manual IP Trigger */}
+        <div className="flex items-center gap-3">
+          {/* Segmented Transport Selector matching Figma node 15:14 */}
+          <div className="flex items-center bg-[#F4F4F5] p-1 rounded-xl border border-[#E4E4E7]">
             {TRANSPORT_OPTIONS.map((opt) => {
               const selected = network.transport_mode === opt.mode;
               return (
@@ -94,10 +84,10 @@ const ConnectionCardComponent: React.FC<ConnectionCardProps> = ({
                   key={opt.mode}
                   type="button"
                   onClick={() => onSetTransportMode(opt.mode)}
-                  className={`px-2.5 py-1 rounded-pill text-[11px] font-medium transition-all ${
+                  className={`px-3 py-1 rounded-lg text-[11.5px] transition-all ${
                     selected
-                      ? 'bg-cyan-500 text-slate-950 font-semibold shadow-sm'
-                      : 'text-slate-400 hover:text-slate-200'
+                      ? 'bg-white text-brand-dark font-bold shadow-sm'
+                      : 'text-brand-muted hover:text-brand-dark font-normal'
                   }`}
                 >
                   {opt.label}
@@ -106,115 +96,99 @@ const ConnectionCardComponent: React.FC<ConnectionCardProps> = ({
             })}
           </div>
 
-          {network.connected && (
-            <div className="flex items-center gap-3 bg-white/5 px-3 py-1.5 rounded-pill border border-white/10 font-mono text-xs">
-              <span
-                className={`text-[11px] font-semibold ${
-                  network.active_transport === 'usb_cable' ? 'text-emerald-400' : 'text-cyan-400'
-                }`}
-              >
-                {network.active_transport === 'usb_cable' ? 'USB Wired' : 'Wi-Fi UDP'}
-              </span>
-              <span className="text-slate-500">•</span>
-              <div className="flex items-center gap-1.5 text-cyan-400">
-                <ActivityIcon size={14} />
-                <span>{network.rtt_ms.toFixed(1)} ms</span>
-              </div>
-              <span className="text-slate-500">|</span>
-              <span className="text-slate-300 text-[11px]">
-                {network.peer_device_name || network.usb_device_name || 'iPhone 13'}
-              </span>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* USB Driver / Device Status Banner */}
-      {(network.transport_mode === 'usb_cable' || network.usb_device_name) && (
-        <div
-          className={`flex items-center justify-between px-3 py-2 rounded-2xl border text-xs ${
-            network.usbmux_available
-              ? network.usb_device_name
-                ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
-                : 'bg-white/[0.03] border-white/10 text-slate-300'
-              : 'bg-amber-500/10 border-amber-500/30 text-amber-300'
-          }`}
-        >
-          <span>
-            {!network.usbmux_available
-              ? 'Apple Mobile Device Service (usbmuxd 127.0.0.1:27015) not detected — install Apple Devices or iTunes for Windows to enable Lightning USB audio.'
-              : network.usb_device_name
-              ? `USB Lightning Detected: ${network.usb_device_name}`
-              : 'usbmuxd ready — connect iPhone via Lightning-to-USB cable and open AudioSync iOS.'}
-          </span>
-          <span className="font-mono text-[10px] opacity-75 ml-2 shrink-0">TCP :54322</span>
-        </div>
-      )}
-
-      {/* Network Stats Grid */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 font-mono text-xs pt-1">
-        <div className="bg-white/[0.03] p-3 rounded-2xl border border-white/5">
-          <div className="text-[10px] text-slate-400 uppercase tracking-wider font-sans">PC Local IP</div>
-          <div className="text-slate-200 mt-1 font-semibold truncate">{network.local_ip}</div>
-        </div>
-        <div className="bg-white/[0.03] p-3 rounded-2xl border border-white/5">
-          <div className="text-[10px] text-slate-400 uppercase tracking-wider font-sans">UDP Port</div>
-          <div className="text-slate-200 mt-1 font-semibold">{network.udp_port}</div>
-        </div>
-        <div className="bg-white/[0.03] p-3 rounded-2xl border border-white/5">
-          <div className="text-[10px] text-slate-400 uppercase tracking-wider font-sans">Packets In / Out</div>
-          <div className="text-slate-200 mt-1 font-semibold">
-            {network.packets_received} / {network.packets_sent}
-          </div>
-        </div>
-        <div className="bg-white/[0.03] p-3 rounded-2xl border border-white/5">
-          <div className="text-[10px] text-slate-400 uppercase tracking-wider font-sans">Packets Lost</div>
-          <div className={`mt-1 font-semibold ${network.packets_lost > 0 ? 'text-amber-400' : 'text-slate-200'}`}>
-            {network.packets_lost}
-          </div>
-        </div>
-      </div>
-
-      {/* Manual IP Fallback Toggle & Input */}
-      <div className="pt-2 border-t border-white/5 flex flex-col gap-2">
-        <div className="flex items-center justify-between">
-          <span className="text-xs text-slate-400">
-            {network.peer_address ? (
-              <span>Peer: <span className="font-mono text-slate-300">{network.peer_address}</span></span>
-            ) : (
-              'Auto-discovery will pair automatically when iPhone opens the app.'
-            )}
-          </span>
+          {/* Manual IP Button */}
           <button
             type="button"
-            onClick={() => setShowManualInput(!showManualInput)}
-            className="text-xs text-cyan-400 hover:text-cyan-300 underline font-medium transition-colors"
+            onClick={() => setShowManualModal(true)}
+            className="clean-pill px-3.5 py-1.5 text-[11.5px] font-bold text-brand-dark hover:bg-zinc-100 flex items-center gap-1.5 shadow-sm"
           >
-            {showManualInput ? 'Close Manual IP' : 'Manual IP Pair'}
+            <span>Manual IP</span>
           </button>
         </div>
-
-        {showManualInput && (
-          <form onSubmit={handleManualSubmit} className="flex items-center gap-2 mt-1 animate-popover">
-            <input
-              type="text"
-              placeholder="e.g. 192.168.1.50:54321"
-              value={manualIp}
-              onChange={(e) => setManualIp(e.target.value)}
-              className="flex-1 bg-white/5 border border-white/10 rounded-pill px-4 py-2 text-xs font-mono text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-cyan-400"
-            />
-            <button
-              type="submit"
-              className="glass-pill px-4 py-2 text-xs font-medium text-cyan-300 hover:text-white flex items-center gap-1.5 border-cyan-500/40"
-            >
-              <CheckIcon size={14} />
-              <span>Connect</span>
-            </button>
-          </form>
-        )}
-        {errorMsg && <div className="text-xs text-rose-400 font-mono">{errorMsg}</div>}
       </div>
-    </div>
+
+      {/* Manual IP & Network Diagnostics Modal / Drawer */}
+      {showManualModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+          <div className="clean-panel max-w-md w-full p-6 flex flex-col gap-5 animate-popover shadow-modal bg-white">
+            <div className="flex items-center justify-between pb-3 border-b border-border">
+              <div className="flex items-center gap-2">
+                <SmartphoneIcon size={18} className="text-brand-dark" />
+                <h3 className="text-sm font-bold text-brand-dark">Network & Manual Pairing</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowManualModal(false)}
+                className="p-1 text-brand-muted hover:text-brand-dark rounded-lg hover:bg-zinc-100 transition-colors"
+              >
+                <XIcon size={18} />
+              </button>
+            </div>
+
+            {/* Network Stats Grid */}
+            <div className="grid grid-cols-2 gap-3 text-xs">
+              <div className="bg-[#F4F4F5] p-3 rounded-xl border border-border">
+                <div className="text-[10px] text-brand-muted uppercase font-semibold">PC Local IP</div>
+                <div className="text-brand-dark mt-0.5 font-mono font-bold text-sm truncate">{network.local_ip}</div>
+              </div>
+              <div className="bg-[#F4F4F5] p-3 rounded-xl border border-border">
+                <div className="text-[10px] text-brand-muted uppercase font-semibold">UDP Listen Port</div>
+                <div className="text-brand-dark mt-0.5 font-mono font-bold text-sm">{network.udp_port}</div>
+              </div>
+              <div className="bg-[#F4F4F5] p-3 rounded-xl border border-border">
+                <div className="text-[10px] text-brand-muted uppercase font-semibold">Packets In / Out</div>
+                <div className="text-brand-dark mt-0.5 font-mono font-bold text-xs">
+                  {network.packets_received} / {network.packets_sent}
+                </div>
+              </div>
+              <div className="bg-[#F4F4F5] p-3 rounded-xl border border-border">
+                <div className="text-[10px] text-brand-muted uppercase font-semibold">Packets Lost (PLC)</div>
+                <div className={`mt-0.5 font-mono font-bold text-xs ${network.packets_lost > 0 ? 'text-brand-red' : 'text-brand-dark'}`}>
+                  {network.packets_lost}
+                </div>
+              </div>
+            </div>
+
+            {/* USB Mux Status */}
+            <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-[#F4F4F5] border border-border text-xs text-brand-muted">
+              <CableIcon size={16} className="text-brand-dark shrink-0" />
+              <span className="flex-1">
+                {network.usbmux_available
+                  ? (network.usb_device_name ? `USB Lightning: ${network.usb_device_name}` : 'USB tunnel service ready (127.0.0.1:27015)')
+                  : 'Apple Mobile Device Service not detected'}
+              </span>
+              <span className="font-mono text-[10px] bg-white px-1.5 py-0.5 rounded border border-border">TCP :54322</span>
+            </div>
+
+            {/* Manual Form */}
+            <form onSubmit={handleManualSubmit} className="flex flex-col gap-3">
+              <label className="text-xs font-semibold text-brand-dark">
+                Direct iPhone IP & Port Pairing:
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  placeholder="e.g. 192.168.1.50:54321"
+                  value={manualIp}
+                  onChange={(e) => setManualIp(e.target.value)}
+                  className="flex-1 bg-[#F4F4F5] border border-border rounded-xl px-3.5 py-2 text-xs font-mono text-brand-dark placeholder:text-zinc-400 focus:outline-none focus:border-brand-dark focus:bg-white"
+                />
+                <button
+                  type="submit"
+                  className="bg-brand-dark text-white px-4 py-2 rounded-xl text-xs font-bold hover:bg-zinc-800 transition-colors"
+                >
+                  Connect
+                </button>
+              </div>
+              {errorMsg && <div className="text-xs text-brand-red">{errorMsg}</div>}
+              <p className="text-[11px] text-brand-muted">
+                Tip: Enter your iPhone’s Wi-Fi IP address shown in the AudioSync iOS app to bypass local mDNS discovery.
+              </p>
+            </form>
+          </div>
+        </div>
+      )}
+    </>
   );
 };
 

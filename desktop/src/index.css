@@ -4,91 +4,106 @@
 
 @layer base {
   body {
-    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
-    background-color: #040508;
-    color: #f1f5f9;
+    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+    background-color: #F4F4F5;
+    color: #18181B;
+    -webkit-font-smoothing: antialiased;
   }
 }
 
-/* 24px dot grid overlay */
-.bg-dot-grid {
-  background-image: radial-gradient(rgba(255, 255, 255, 0.12) 1px, transparent 1px);
-  background-size: 24px 24px;
-}
-
-/* Glass surface utility */
-.glass-panel {
-  background: rgba(18, 22, 34, 0.88);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.10);
-  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.12), 0 16px 32px -12px rgba(0, 0, 0, 0.65);
-  border-radius: 28px;
-}
-
-.glass-dropdown {
-  background: rgba(18, 22, 34, 0.95);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.16), 0 20px 40px -12px rgba(0, 0, 0, 0.85);
+/* Minimalist clean panel */
+.clean-panel {
+  background: #FFFFFF;
+  border: 1px solid #E4E4E7;
   border-radius: 20px;
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.04);
 }
 
-.glass-pill {
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.15);
+/* Minimalist pill buttons */
+.clean-pill {
+  border: 1px solid #E4E4E7;
+  background: #FFFFFF;
+  color: #18181B;
   border-radius: 9999px;
-  transition: all 200ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition: all 150ms ease;
 }
 
-.glass-pill:hover {
-  background: rgba(255, 255, 255, 0.11);
-  border-color: rgba(255, 255, 255, 0.2);
+.clean-pill:hover {
+  background: #F4F4F5;
+  border-color: #D4D4D8;
 }
 
-.glass-pill:active {
-  transform: scale(0.96);
+.clean-pill:active {
+  transform: scale(0.98);
 }
 
-/* Custom range sliders */
+/* Minimalist range slider */
 input[type="range"] {
   -webkit-appearance: none;
   appearance: none;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #E4E4E7;
   border-radius: 9999px;
-  height: 6px;
+  height: 4px;
   outline: none;
 }
 
 input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   border-radius: 9999px;
-  background: #ffffff;
-  border: 2px solid #22d3ee;
-  box-shadow: 0 0 12px rgba(34, 211, 238, 0.6);
+  background: #FFFFFF;
+  border: 1.5px solid #18181B;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
   cursor: pointer;
-  transition: transform 150ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition: transform 120ms ease;
 }
 
 input[type="range"]::-webkit-slider-thumb:hover {
-  transform: scale(1.2);
+  transform: scale(1.15);
 }
 
 input[type="range"]::-webkit-slider-thumb:active {
-  transform: scale(1.1);
+  transform: scale(1.05);
 }
 
-/* Animation for popovers */
+/* Minimal toggle switch */
+.clean-toggle {
+  position: relative;
+  width: 40px;
+  height: 22px;
+  background-color: #E4E4E7;
+  border-radius: 9999px;
+  transition: background-color 200ms ease;
+  cursor: pointer;
+}
+
+.clean-toggle.active {
+  background-color: #18181B;
+}
+
+.clean-toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  background-color: #FFFFFF;
+  border-radius: 9999px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  transition: transform 200ms ease;
+}
+
+.clean-toggle.active .clean-toggle-thumb {
+  transform: translateX(18px);
+}
+
+/* Popover & modal animation */
 @keyframes popoverIn {
   from {
     opacity: 0;
-    transform: translateY(8px) scale(0.96);
+    transform: translateY(4px) scale(0.98);
   }
   to {
     opacity: 1;
@@ -97,7 +112,7 @@ input[type="range"]::-webkit-slider-thumb:active {
 }
 
 .animate-popover {
-  animation: popoverIn 200ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation: popoverIn 150ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 /* Ambient lighting orb glow (smooth radial gradient stops, zero heavy Gaussian blur convolution) */

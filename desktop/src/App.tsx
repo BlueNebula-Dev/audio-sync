@@ -4,7 +4,6 @@ import { listen } from '@tauri-apps/api/event';
 import { ConnectionCard } from './components/ConnectionCard';
 import { PcAudioCard } from './components/PcAudioCard';
 import { MicAudioCard } from './components/MicAudioCard';
-import { SlidersIcon } from './components/Icons';
 import { AppSnapshot, AudioConfig, AudioLevels, TransportMode } from './types';
 
 export const App: React.FC = () => {
@@ -122,61 +121,20 @@ export const App: React.FC = () => {
   }, []);
 
   return (
-    <div className="relative min-h-screen w-screen bg-canvas text-slate-100 flex flex-col p-6 overflow-x-hidden select-none">
-      {/* 24px dot grid overlay */}
-      <div className="fixed inset-0 bg-dot-grid pointer-events-none opacity-40 z-0" />
-
-      {/* Vivid ambient lighting waves */}
-      <div className="ambient-glow-violet top-[-80px] left-[15%] w-[480px] h-[380px] z-0 opacity-60" />
-      <div className="ambient-glow-cyan top-[20%] right-[-100px] w-[540px] h-[440px] z-0 opacity-40" />
-      <div className="ambient-glow-violet bottom-[-100px] left-[35%] w-[600px] h-[400px] z-0 opacity-50" />
-
-      {/* Main Container */}
-      <div className="relative z-10 max-w-6xl w-full mx-auto flex flex-col gap-6">
-        {/* Top App Header */}
-        <header className="flex items-center justify-between pb-2 border-b border-white/10">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-pill bg-gradient-to-tr from-cyan-400 via-blurple to-violet-500 p-[1px] shadow-[0_0_20px_rgba(99,102,241,0.5)]">
-              <div className="w-full h-full bg-slate-950 rounded-pill flex items-center justify-center">
-                <SlidersIcon size={18} className="text-cyan-400" />
-              </div>
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-base font-bold tracking-tight text-white">AudioSync Pro</h1>
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded-pill bg-white/10 text-cyan-300 font-semibold border border-white/10">
-                  v0.1.0
-                </span>
-              </div>
-              <p className="text-xs text-slate-400">
-                Low-Latency Bi-Directional Wi-Fi Audio Sync for iPhone 13 & Windows
-              </p>
-            </div>
-          </div>
-
-          {/* Quick status badge */}
-          <div className="flex items-center gap-2 text-xs font-mono">
-            <span className="px-3 py-1 rounded-pill bg-white/5 border border-white/10 text-slate-300">
-              WASAPI Loopback 48kHz
-            </span>
-            <span className="px-3 py-1 rounded-pill bg-white/5 border border-white/10 text-slate-300">
-              Opus Low-Delay
-            </span>
-          </div>
-        </header>
-
+    <div className="min-h-screen w-screen bg-[#F4F4F5] text-brand-dark flex flex-col p-6 overflow-x-hidden select-none">
+      {/* Main Container matching Figma 960x600 layout */}
+      <div className="max-w-5xl w-full mx-auto flex flex-col gap-4">
         {snapshot ? (
           <>
-            {/* Top Row: Network Discovery & Connection Card */}
+            {/* Top Single-Row Utility Bar */}
             <ConnectionCard
               network={snapshot.network}
               onSetManualPeer={handleSetManualPeer}
               onSetTransportMode={handleSetTransportMode}
             />
 
-            {/* Bottom Row: Dual Audio Cards (PC Desktop Audio vs iPhone Mic) */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {/* Left Column: PC to iPhone Stream */}
+            {/* Dual Panel Grid (PC Output on Left, iPhone Mic on Right) */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-stretch">
               <PcAudioCard
                 config={snapshot.config}
                 levels={snapshot.levels}
@@ -184,7 +142,6 @@ export const App: React.FC = () => {
                 onUpdateConfig={handleUpdateConfig}
               />
 
-              {/* Right Column: iPhone to PC Microphone Stream */}
               <MicAudioCard
                 config={snapshot.config}
                 levels={snapshot.levels}
@@ -198,9 +155,9 @@ export const App: React.FC = () => {
             </div>
           </>
         ) : (
-          <div className="glass-panel p-16 flex flex-col items-center justify-center gap-4 text-center">
-            <div className="w-12 h-12 rounded-full border-2 border-cyan-400 border-t-transparent animate-spin" />
-            <div className="text-sm text-slate-300">Initializing Audio Engine & Network Telemetry...</div>
+          <div className="clean-panel p-16 flex flex-col items-center justify-center gap-4 text-center">
+            <div className="w-8 h-8 rounded-full border-2 border-brand-dark border-t-transparent animate-spin" />
+            <div className="text-xs text-brand-muted font-medium">Initializing AudioSync Pro...</div>
           </div>
         )}
       </div>
